@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from groq import Groq
 from pydantic import BaseModel
 
-from app.routers.conversations import save_message
+from app.routers.conversations import save_message, upsert_session
 from app.services.ownership import is_owner
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -30,7 +30,10 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     user_id: str
+    session_id: str
     post_id: Optional[str] = None
+    post_title: Optional[str] = None
+    post_category: Optional[str] = None
     messages: list[ChatMessage]
 
 
@@ -38,13 +41,20 @@ class ChatRequest(BaseModel):
 async def chat_stream(data: ChatRequest):
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-    # post_id가 있어도 요청자가 그 글의 작성자가 아니면 채팅 자체는 그대로 흘려보내고
-    # 저장(대화 기록 연결)만 하지 않는다 — 다른 사람 글의 대화 기록을 훔쳐 쓰지 못하게.
-    can_persist = bool(data.post_id) and await is_owner(data.post_id, data.user_id)
+    # post_id가 있는 세션(글쓰기 세션)은 요청자가 그 글의 작성자일 때만 저장.
+    # post_id가 없는 일반 세션은 항상 저장 (FE가 준 user_id를 그대로 신뢰).
+    can_persist = True
+    if data.post_id:
+        can_persist = await is_owner(data.post_id, data.user_id)
+
+    if can_persist:
+        upsert_session(
+            data.session_id, data.user_id, data.post_id, data.post_title, data.post_category
+        )
 
     last_user = next((m for m in reversed(data.messages) if m.role == "user"), None)
     if last_user and can_persist:
-        save_message(data.post_id, data.user_id, "user", last_user.content)
+        save_message(data.session_id, "user", last_user.content)
 
     groq_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -66,7 +76,7 @@ async def chat_stream(data: ChatRequest):
                 yield f"data: {json.dumps({'text': text})}\n\n"
         yield "data: [DONE]\n\n"
         if can_persist:
-            save_message(data.post_id, data.user_id, "assistant", full_text)
+            save_message(data.session_id, "assistant", full_text)
 
     return StreamingResponse(
         generate(),

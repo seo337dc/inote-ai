@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from typing import Optional
+
+from fastapi import APIRouter
+
+from app.db.postgres import get_connection
+
+router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+@router.get("")
+async def list_sessions(user_id: str, q: Optional[str] = None):
+    """세션 목록. q가 있으면 글 제목이나 대화 내용에 그 문구가 포함된 세션만."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            if q:
+                like = f"%{q}%"
+                cur.execute(
+                    "select distinct s.id, s.post_id, s.post_title, s.post_category, "
+                    "s.updated_at, "
+                    "(select content from conversations c2 where c2.session_id = s.id "
+                    " order by c2.created_at desc limit 1) as last_message "
+                    "from conversation_sessions s "
+                    "left join conversations c on c.session_id = s.id "
+                    "where s.user_id = %s "
+                    "and (s.post_title ilike %s or c.content ilike %s) "
+                    "order by s.updated_at desc",
+                    (user_id, like, like),
+                )
+            else:
+                cur.execute(
+                    "select s.id, s.post_id, s.post_title, s.post_category, s.updated_at, "
+                    "(select content from conversations c where c.session_id = s.id "
+                    " order by c.created_at desc limit 1) as last_message "
+                    "from conversation_sessions s "
+                    "where s.user_id = %s "
+                    "order by s.updated_at desc",
+                    (user_id,),
+                )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": r[0],
+            "post_id": r[1],
+            "post_title": r[2],
+            "post_category": r[3],
+            "updated_at": r[4].isoformat(),
+            "last_message": r[5],
+        }
+        for r in rows
+    ]

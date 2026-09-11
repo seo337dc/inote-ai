@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from app.routers import chat, conversations, summarize
+from app.routers import chat, conversations, sessions, summarize
 
 app = FastAPI(title="inote-ai")
 
@@ -21,6 +21,7 @@ app.add_middleware(
 
 app.include_router(chat.router)
 app.include_router(conversations.router)
+app.include_router(sessions.router)
 app.include_router(summarize.router)
 
 
