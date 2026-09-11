@@ -1,0 +1,7 @@
+fastapi==0.128.8
+uvicorn==0.39.0
+groq==1.0.0
+python-dotenv==1.2.1
+pydantic==2.13.5
+psycopg[binary]==3.2.4
+httpx==0.28.1
