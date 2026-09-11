@@ -125,3 +125,30 @@ PyPI 기준 cp38~cp313까지만 prebuilt wheel을 제공하고 cp314는 없음(�
 env var를 명시해서 이중으로 고정. 3.12는 `psycopg-binary==3.2.4`가 지원하는 범위 안이라 이
 조합으로 재배포하면 해결될 것으로 예상(로컬엔 3.12 인터프리터가 없어 완전한 재현 검증은
 못 했고, 다음 배포 시도에서 확인 필요).
+
+#### 📄 콜드 스타트 방지 — 아직 미설정, `inote-server` 방식 참고 필요
+
+Render 무료 플랜은 15분 무활동 시 슬립. `inote-server`는 [cron-job.org](https://cron-job.org)
+대시보드에서 `/api/v1/health`를 10분마다 호출하도록 등록해서 이 문제를 막고 있음(레포 안에는
+설정 파일 없이 cron-job.org 자체 설정으로만 존재). `inote-ai`는 아직 실제 프로덕션 URL이
+없어서(배포 시도 중) 이 설정을 못 했고, 배포 완료 후 같은 방식으로 `GET /health`를
+cron-job.org에 등록해야 함 — README 배포 섹션에 TODO로 남겨둠.
+
+#### ✅ 배포 성공 — https://inote-ai.onrender.com
+
+`runtime.txt`/`PYTHON_VERSION` 고정 후 재배포 성공. `curl`로 `/health` 200 OK 확인.
+cron-job.org 등록은 계정 접근이 필요해 아직 미완료(README 배포 섹션에 등록값 남겨둠) —
+등록 전까지는 15분 무활동 시 슬립, 첫 요청에 콜드 스타트(수십 초) 발생할 수 있음.
+
+**남은 연동 작업** (배포 URL이 나왔으니 이어서 해야 함):
+- `inote-server` Render 환경변수 `INOTE_AI_URL` → `https://inote-ai.onrender.com`
+- `inote`(FE) Vercel 환경변수 `NEXT_PUBLIC_AI_API_URL` → `https://inote-ai.onrender.com`
+- `inote-ai`의 `ALLOWED_ORIGINS` 환경변수에 `inote` 프로덕션 도메인이 들어있는지 확인
+
+#### ✅ Swagger 문서 확인
+
+FastAPI는 별도 설정 없이도 `/docs`(Swagger UI)와 `/openapi.json`을 자동 생성한다 — 각
+라우터에 `tags`(`chat`/`conversations`/`sessions`/`summarize`)가 이미 붙어 있어서 그룹핑도
+바로 정리돼 보임. 배포된 `https://inote-ai.onrender.com/docs`에서 5개 엔드포인트(`/chat/stream`,
+`/conversations/{session_id}`, `/sessions`, `/summarize`, `/health`) 전부 정상 노출되는 것
+확인. README API 섹션에 Swagger URL 추가.

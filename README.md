@@ -35,6 +35,9 @@ inote (FE, Next.js)
 | POST | `/summarize` | 글 내용 → 불릿 요약 (내부 전용, `x-internal-secret`) |
 | GET | `/health` | 헬스 체크 |
 
+FastAPI가 기본 제공하는 Swagger UI를 그대로 씀 — 로컬 `http://localhost:8000/docs`, 배포
+`https://inote-ai.onrender.com/docs` (OpenAPI 스키마는 `/openapi.json`).
+
 ## 스택
 
 - Python + FastAPI + uvicorn
@@ -73,6 +76,19 @@ uvicorn app.main:app --reload --port 8000
 Render 무료 티어, `render.yaml` 블루프린트 사용. Render 대시보드에서 "New +" → "Blueprint"로
 이 레포를 연결하면 `render.yaml`대로 서비스가 만들어지고, 위 환경변수 5개만 대시보드에서
 직접 입력하면 된다 (전부 `sync: false`라 레포에는 값이 없음).
+
+배포 URL: https://inote-ai.onrender.com
+
+**콜드 스타트 방지 (TODO)** — `inote-server`는 [cron-job.org](https://cron-job.org)에서
+10분마다 헬스체크를 호출해 Render 무료 플랜의 슬립(15분 무활동)을 막고 있다. `inote-ai`도
+같은 방식으로 cron-job.org에 아래 값으로 등록해야 한다 (cron-job.org 계정 접근이 필요해
+사람이 직접 등록):
+
+| 항목 | 값 |
+|------|-----|
+| URL | `https://inote-ai.onrender.com/health` |
+| Method | GET |
+| 주기 | 10분마다 |
 
 ## 관련 문서
 
