@@ -109,3 +109,19 @@ Render 배포를 위해 `render.yaml` 신규 추가 — `inote-server`가 쓰던
 $PORT`. 환경변수 5개(`GROQ_API_KEY`/`DATABASE_URL`/`INTERNAL_SECRET`/`INOTE_SERVER_URL`/
 `ALLOWED_ORIGINS`)는 전부 `sync: false`로 — 실제 값은 레포에 안 남기고 Render 대시보드에서
 직접 입력하도록. 실제 배포(서비스 생성, 값 입력)는 계정 접근이 필요해 사람이 직접 진행.
+
+#### 🐛 첫 배포 실패 — `psycopg-binary==3.2.4` 설치 불가 (Python 버전 미스매치)
+
+Render에서 실제로 Blueprint 배포를 시도하자 빌드 단계에서 실패:
+`ERROR: Could not find a version that satisfies the requirement psycopg-binary==3.2.4`.
+
+원인 파악: 로그에 찍힌 다른 패키지(`pydantic-core`)의 wheel 파일명이 `cp314`였다 — Render의
+기본 Python 빌드 이미지가 3.14라는 뜻. `requirements.txt`에 고정한 `psycopg[binary]==3.2.4`는
+PyPI 기준 cp38~cp313까지만 prebuilt wheel을 제공하고 cp314는 없음(로컬 venv는 Python 3.9라
+문제없이 설치됐던 것). `runtime.txt`/`PYTHON_VERSION` 같은 버전 고정 없이 배포하면 Render가
+쓰는 기본 Python 버전에 그대로 노출되는 구조라 생긴 문제.
+
+**해결**: `runtime.txt`(`python-3.12.7`) 추가 + `render.yaml`에도 `PYTHON_VERSION=3.12.7`
+env var를 명시해서 이중으로 고정. 3.12는 `psycopg-binary==3.2.4`가 지원하는 범위 안이라 이
+조합으로 재배포하면 해결될 것으로 예상(로컬엔 3.12 인터프리터가 없어 완전한 재현 검증은
+못 했고, 다음 배포 시도에서 확인 필요).
