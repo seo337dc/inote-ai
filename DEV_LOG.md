@@ -1,0 +1,111 @@
+# DEV_LOG — inote-ai
+
+> 세션별 작업 이력. 로드맵/현재 체크리스트는 `CLAUDE.md` 참고 — 여기는 "무엇을 왜 그렇게
+> 만들었는지"를 상세히 남기는 문서.
+
+---
+
+## 2026-09-11 — 블로그 LLM 챗 어시스턴트: 스캐폴딩부터 세션/검색까지
+
+`inote`(Next.js 블로그)에 "글쓰기를 돕는 LLM 챗"을 붙이는 작업. 단순 챗봇이 아니라 대화 저장,
+저장 시 자동 요약, 접근 제어, 세션 목록/검색까지 이어붙였다. 한 번에 다 만들지 않고 아래 순서로
+하나씩 구현 → 브라우저/curl로 확인 → 다음 단계로 진행.
+
+### 왜 서비스를 3개로 나눴나
+
+```
+inote (FE, Next.js)
+  ├─ inote-server (BE, NestJS)            — 글 CRUD, 인증(Better Auth), 자체 Neon DB
+  └─ inote-ai (이 레포, FastAPI/Python)     — LLM 채팅, 대화 저장, AI 요약, 별도 Neon DB
+```
+
+블로그 CRUD/인증과 "LLM이 하는 일"을 처음부터 별도 서비스로 분리했다. Python LLM 생태계를
+쓰고 싶었고, AI 쪽 장애/지연이 글쓰기 자체(inote-server)에 전파되지 않게 하려는 목적. DB도
+완전히 분리돼 있어서 서로의 데이터를 직접 조인하지 못하고, 필요하면 내부 전용 API로 물어본다
+(예: `inote-server`의 `GET /blog/posts/:id/owner`, 고정 시크릿 헤더 `x-internal-secret`로
+서비스 간 인증). 로그인 로직 자체는 이 레포에 없음 — FE가 실어 보내는 `user_id`를 그대로
+신뢰(개인 프로젝트 범위에서는 충분하다고 판단, 진짜 검증이 필요해지면 그때 추가).
+
+### 단계별 구현
+
+**1. 최소 스캐폴딩** — FastAPI `/chat/stream` 하나만. Groq API로 SSE 스트리밍 응답만 나옴.
+DB·인증·도구 없음. 기존 FE `ChatDock`을 붙여서 브라우저로 실제 대화 확인.
+
+**2. Draft(임시글) 개념 도입** (`inote-server`) — 저장 버튼을 누르기 전부터 그 글의 대화를
+그 글에 묶으려면 "저장 전 글"도 고정 ID가 있어야 했음. `Post.publishedAt`을 nullable 필드로
+추가 — null이면 draft, 값이 있으면 발행된 글. `POST /blog/posts/draft`(로그인 필요)로 글쓰기
+페이지 진입 즉시 빈 Post row 생성. 공개 목록(`GET /blog/posts`)은 발행된 글만 노출, 단건
+조회는 draft면 작성자 본인만(그 외 404로 존재 자체를 숨김) — 이를 위해 "로그인 안 해도 통과,
+했으면 request.user 채움" 동작의 `OptionalAuthGuard` 신설.
+
+**3. 대화 기록 저장** — `inote-ai` 전용 Neon DB 신규 프로비저닝, `conversations` 테이블
+(`post_id`/`user_id`/`role`/`content`) 추가. `/chat/stream`이 `post_id`가 있을 때만
+fire-and-forget으로 저장, `GET /conversations/{post_id}`로 이력 조회. FE는 `/write?id=X`
+페이지에서만 `post_id`를 실어 보내고 진입 시 이력을 복원. 새로고침해도 대화가 유지되는지,
+그 외 페이지의 일반 채팅은 여전히 비영속인지 둘 다 확인.
+
+**4. 저장 시 AI 자동 요약** — 글을 진짜 저장(발행)하면 `inote-server`가 `inote-ai`의
+`POST /summarize`(Groq, 불릿 3~4개, `x-internal-secret` 헤더 검증)를 호출해 요약을 받는다.
+`Post`에 필드로 얹지 않고 `PostSummary`(1:1, `onDelete: Cascade`) 별도 테이블로 분리 —
+요약 실패해도 글 저장 자체는 항상 성공하도록 try/catch로 격리. 빈 내용(초기 draft) 저장은
+요약 호출 스킵. 실제 글 작성 → 저장 → 상세 페이지 AI 개요 박스에 진짜 요약 표시까지 확인.
+
+**5. 접근 제어** — 다른 사용자가 남의 글 LLM 대화 기록을 못 보게 막는 단계.
+`inote-server`에 내부 전용 `GET /blog/posts/:id/owner` 신설, `inote-ai`의
+`app/services/ownership.py`가 이를 호출해 `post_id`의 실제 작성자와 요청자 `user_id`를
+대조. `GET /conversations/{post_id}`는 `user_id` 필수 + 불일치 시 403. 포인트는 —
+**소유자가 아니어도 `/chat/stream` 자체(스트리밍 응답)는 그대로 동작하되, 대화 저장만
+건너뜀** ("채팅은 되지만 그 글에는 안 묶임", 기능은 막지 않고 데이터만 격리). curl로
+owner/other 두 사용자 시나리오 전부 검증(조회 403, 채팅 정상 응답, other 메시지는 저장 안 됨).
+
+**3.5. 대화 세션 목록 + 검색** — "글 하나 = 대화 하나"였던 3번 구조를, 실제 LLM 서비스들처럼
+여러 대화를 옆에서 골라 쓰는 구조로 확장. `conversation_sessions`(세션) + `conversations`
+(메시지, `session_id` FK) 두 테이블로 재설계. 세션 id는 글쓰기 세션이면 `post_id`를 그대로,
+일반 대화 세션이면 FE가 만든 UUID. `GET /sessions?user_id=X`로 세션 목록(마지막 메시지
+미리보기 포함) 제공, 일반 채팅도 로그인 상태면 저장됨(글쓰기 세션과 달리 소유권 검사 불필요,
+`user_id`만 신뢰). 이후 `q` 파라미터를 추가해 `post_title`/`conversations.content`를
+`ILIKE`로 검색(FE는 300ms 디바운스로 호출).
+
+### FE UI — 세션 패널은 한 번에 정착되지 않았다
+
+왼쪽에 항상 떠 있는 사이드바 → 하단 아이콘으로 여닫는 토글 패널 → (처음엔) 채팅 영역을
+통째로 대체하는 방식 → 클로드처럼 채팅 옆에 나란히 두는 side-by-side 방식 → 최종적으로
+"채팅 위에 슬라이드로 겹쳐지는 오버레이"(데스크탑은 채팅 영역의 80%만 덮고 나머지 20%는
+딤 처리, 모바일은 시트 전체를 덮음)로 정착. 그 밖에 입력창은 높이를 키우고 Shift+Enter로
+줄바꿈/Enter로 즉시 전송하도록 개선.
+
+카테고리 필터 영역도 처음엔 홈에 뒀다가, 돌아보니 "내 글을 관리하는" 성격이 강해 "나의 글"
+페이지로 옮기고 모바일 드로어는 홈/나의 글 양쪽에서 다 열리게 정리.
+
+### 개발 중 발견해 같이 고친 버그 3건
+
+1. **자동저장 400 Bad Request** — `UpdatePostDto`가 `PartialType(CreatePostDto)`를 통해
+   `@MinLength(1)`을 그대로 물려받아서, `publish` 없는 자동저장 요청도 제목/본문 최소 길이
+   검증에 걸림. `@ValidateIf((o) => o.publish === true)`로 `publish`가 true일 때만
+   검증하도록 수정.
+2. **메시지 없는 새 세션 조회가 403** — `get_history`가 "세션 row 없음"과 "세션은 있는데
+   소유자가 다름"을 똑같이 403으로 처리하던 버그. 전자는 빈 배열, 후자만 403으로 분리.
+3. **모바일 글 상세 페이지 가로 스크롤** — 처음엔 `.prose`의 줄바꿈 규칙(`overflow-wrap`)
+   문제로 보였지만, 진짜 원인은 LLM 패널을 헤더 옆에 두려고 만든 최상위 `flex` 레이아웃
+   컨테이너에 `min-w-0`이 빠져 있던 것 — flex item 기본값 `min-width: auto` 때문에 내부
+   콘텐츠가 뷰포트보다 넓게 밀려나는 전형적인 flex 오버플로우 버그였다.
+
+### 아직 안 한 것 (`CLAUDE.md` 로드맵 6~8번)
+
+- 웹 검색 도구 — Groq `compound-beta` 연동
+- "에디터에 삽입" tool-call — LLM이 자유 대화 중 제안하거나 사용자 요청 시 실제로 에디터에
+  글을 써넣는 기능 (고정 버튼이 아니라 LLM이 직접 tool을 호출하는 방식으로 설계)
+- 오래된 draft 정리 배치 — `inote-server`에 매일 자정 크론으로 `publishedAt IS NULL` +
+  2일 지난 `Post` 삭제, 삭제된 postId로 `inote-ai`를 호출해 관련 대화 기록도 같이 삭제
+
+### README 정리 + Render 배포 준비
+
+`inote-ai` README가 "역할/스택 (예정)" 상태로 방치돼 있던 걸(실제로는 위 내용 전부 이미
+구현됨) 현재 구현 기준으로 다시 씀 — API 목록, 환경변수, 로컬 실행 방법 추가.
+
+Render 배포를 위해 `render.yaml` 신규 추가 — `inote-server`가 쓰던 Blueprint 방식과 동일한
+패턴(`runtime`/`buildCommand`/`startCommand`/`healthCheckPath`). Python 서비스라 `buildCommand`는
+`pip install -r requirements.txt`, `startCommand`는 `uvicorn app.main:app --host 0.0.0.0 --port
+$PORT`. 환경변수 5개(`GROQ_API_KEY`/`DATABASE_URL`/`INTERNAL_SECRET`/`INOTE_SERVER_URL`/
+`ALLOWED_ORIGINS`)는 전부 `sync: false`로 — 실제 값은 레포에 안 남기고 Render 대시보드에서
+직접 입력하도록. 실제 배포(서비스 생성, 값 입력)는 계정 접근이 필요해 사람이 직접 진행.

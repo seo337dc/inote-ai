@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: inote-ai
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: INTERNAL_SECRET
+        sync: false
+      - key: INOTE_SERVER_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
