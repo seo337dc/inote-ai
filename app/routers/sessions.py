@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 
 from app.db.postgres import get_connection
 
@@ -51,3 +52,18 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
         }
         for r in rows
     ]
+
+
+@router.delete("")
+async def delete_user_sessions(user_id: str, x_internal_secret: str = Header(default="")):
+    """회원 탈퇴 시 inote-server가 호출 — 그 유저의 세션·대화 기록을 전부 삭제.
+    internal 전용(x-internal-secret). conversations는 session_id FK가 cascade라 세션만 지우면 됨."""
+    if x_internal_secret != os.environ.get("INTERNAL_SECRET"):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("delete from conversation_sessions where user_id = %s", (user_id,))
+            deleted = cur.rowcount
+
+    return {"deleted_sessions": deleted}

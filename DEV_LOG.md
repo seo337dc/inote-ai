@@ -168,3 +168,10 @@ FastAPI는 별도 설정 없이도 `/docs`(Swagger UI)와 `/openapi.json`을 자
 로컬 uvicorn으로 두 경로 다 curl 검증: 게스트(session_id null) → 스트리밍 정상 응답 +
 DB에 아무것도 안 남음, 로그인(session_id 있음) → 스트리밍 정상 응답 + DB에 세션/메시지
 정상 저장. 테스트로 만든 세션은 확인 후 삭제.
+
+## 2026-09-14 — 회원 탈퇴 연동용 세션 삭제 엔드포인트
+
+`DELETE /sessions?user_id=X` 신규 (내부 전용, `x-internal-secret`). `inote-server`가
+회원 탈퇴 시 호출해서 그 유저의 `conversation_sessions`를 지운다 — `conversations.session_id`가
+`conversation_sessions`에 `on delete cascade`라 세션만 지우면 대화 메시지도 같이 삭제됨,
+별도 쿼리 불필요.
