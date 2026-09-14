@@ -152,3 +152,19 @@ FastAPI는 별도 설정 없이도 `/docs`(Swagger UI)와 `/openapi.json`을 자
 바로 정리돼 보임. 배포된 `https://inote-ai.onrender.com/docs`에서 5개 엔드포인트(`/chat/stream`,
 `/conversations/{session_id}`, `/sessions`, `/summarize`, `/health`) 전부 정상 노출되는 것
 확인. README API 섹션에 Swagger URL 추가.
+
+## 2026-09-14 — 게스트 채팅 422 버그 수정
+
+로컬 FE/BE + 배포된 AI 도메인 조합으로 테스트하다가 발견: 로그인 안 한 게스트가 채팅을
+보내면 항상 422가 났다. `ChatRequest.session_id`가 `str`(필수)인데, FE는 게스트일 때
+`session_id`를 `null`로 보내도록 원래 설계돼 있어서(세션 자체가 없으니까) — 3.5단계에서
+세션 구조로 확장하며 이 필드를 필수로 만들 때 게스트 경로를 놓친 것. 배포본에서도 계속
+깨져 있던 상태였고, 화면엔 "답변을 가져오지 못했어요"로만 조용히 실패해서 그동안 못 잡았음.
+
+**수정**: `session_id: Optional[str] = None`으로 변경, `can_persist`를
+`data.session_id is not None`부터 시작하도록 재구성(게스트는 무조건 저장 안 함, 로그인
+세션은 기존처럼 post_id 소유권 검사).
+
+로컬 uvicorn으로 두 경로 다 curl 검증: 게스트(session_id null) → 스트리밍 정상 응답 +
+DB에 아무것도 안 남음, 로그인(session_id 있음) → 스트리밍 정상 응답 + DB에 세션/메시지
+정상 저장. 테스트로 만든 세션은 확인 후 삭제.

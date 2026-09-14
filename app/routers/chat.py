@@ -30,7 +30,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     user_id: str
-    session_id: str
+    session_id: Optional[str] = None
     post_id: Optional[str] = None
     post_title: Optional[str] = None
     post_category: Optional[str] = None
@@ -41,10 +41,11 @@ class ChatRequest(BaseModel):
 async def chat_stream(data: ChatRequest):
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-    # post_id가 있는 세션(글쓰기 세션)은 요청자가 그 글의 작성자일 때만 저장.
+    # session_id가 없으면 로그인 안 한 게스트 — 저장 자체를 안 함(휘발성 채팅).
+    # session_id가 있으면, post_id가 있는 글쓰기 세션은 요청자가 그 글의 작성자일 때만 저장.
     # post_id가 없는 일반 세션은 항상 저장 (FE가 준 user_id를 그대로 신뢰).
-    can_persist = True
-    if data.post_id:
+    can_persist = data.session_id is not None
+    if can_persist and data.post_id:
         can_persist = await is_owner(data.post_id, data.user_id)
 
     if can_persist:
