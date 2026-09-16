@@ -67,3 +67,19 @@ async def delete_user_sessions(user_id: str, x_internal_secret: str = Header(def
             deleted = cur.rowcount
 
     return {"deleted_sessions": deleted}
+
+
+@router.delete("/{session_id}")
+async def delete_session(session_id: str, x_internal_secret: str = Header(default="")):
+    """글(post) 삭제 시 inote-server가 호출 — 그 글에 묶인 세션 하나만 삭제.
+    글쓰기 세션의 id는 post_id를 그대로 쓰므로 session_id에 postId를 넘기면 됨.
+    internal 전용(x-internal-secret). conversations는 cascade라 세션만 지우면 됨."""
+    if x_internal_secret != os.environ.get("INTERNAL_SECRET"):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("delete from conversation_sessions where id = %s", (session_id,))
+            deleted = cur.rowcount
+
+    return {"deleted_sessions": deleted}
