@@ -175,3 +175,60 @@ DB에 아무것도 안 남음, 로그인(session_id 있음) → 스트리밍 정
 회원 탈퇴 시 호출해서 그 유저의 `conversation_sessions`를 지운다 — `conversations.session_id`가
 `conversation_sessions`에 `on delete cascade`라 세션만 지우면 대화 메시지도 같이 삭제됨,
 별도 쿼리 불필요.
+
+## 2026-09-28 — 독서 기록용 책 정보 자동생성 엔드포인트
+
+`inote`에 새로 추가된 "독서 기록" 기능(제목/저자/기간 + 자유 독후감)을 위해, 책 제목(+저자)만
+보고 장르/줄거리/작가소개를 생성하는 `POST /book-info` 추가 (`/summarize`와 동일하게 내부
+전용, `x-internal-secret`). `inote-server`의 `ReadingLogsService`가 독서 기록 발행 시 호출해서
+`ReadingLogSummary`에 반영 — `PostSummary`/`summarize()`와 완전히 동일한 fail-open 패턴
+(AI 실패해도 독서 기록 저장 자체는 안 막음).
+
+**막혔던 것 2개**:
+1. `response_format={"type": "json_object"}`로 JSON 모드를 켰는데 `max_tokens=512`로는
+   `openai/gpt-oss-20b`가 답 생성 전에 쓰는 내부 추론 토큰까지 그 안에 포함돼서, 완성된 JSON을
+   다 못 쓰고 잘리는 경우가 실제로 있었음(`json_validate_failed`, 500 에러). `max_tokens`를
+   1536으로 올리고, 그래도 실패하면(모델 장애 등) 500으로 죽이지 않고 빈 필드로 응답하도록
+   try/except 추가 — 이 정보는 "있으면 좋은" 보조 정보라 실패해도 저장을 막으면 안 됨.
+2. 첫 테스트에서 시스템 프롬프트가 한국어인데도 응답이 영어로 나오는 경우가 있었음 —
+   "genre/synopsis/authorBio 값은 반드시 한국어로 작성해"를 프롬프트에 명시해서 해결.
+
+로컬 uvicorn + 로컬 inote-server 조합으로 실제 발행 플로우 curl 검증 — 제목+저자만 넣고
+발행하니 실제로 아는 책(예: 『참을 수 없는 존재의 가벼움』)은 정확한 줄거리/작가소개가,
+지어낸 제목은 그럴듯한 일반적 설명이 생성됨을 확인. 테스트로 만든 기록은 삭제(cascade로
+summary도 같이 삭제되는 것까지 확인).
+
+## 2026-09-28 — 독서 상담 채팅 (카카오 도서 검색 tool calling)
+
+알라딘 Open API가 서비스 종료 예정이라 대체 데이터 소스 조사 — 교보문고 RSS
+(`news.kyobobook.co.kr`)는 이미 죽은 서비스였고, 베스트셀러는 스크래핑이 필요해서 별도
+작업으로 분리(교보 `robots.txt`는 일반 크롤링은 허용, `/api/gw`만 차단 확인). 이번엔 카카오
+도서 검색 API(`GET https://dapi.kakao.com/v3/search/book`, 무료 REST API 키)만 먼저 연동.
+
+LangChain 대신 Groq 네이티브 function calling으로 구현(`POST /reading-chat/stream`) —
+1단계에서 non-stream으로 tool 호출 필요 여부 판단 → 실제 실행 → 2단계에서 결과를 반영해
+최종 답변. `search_books` 하나를 tool로 등록(`app/services/book_tools.py`).
+
+**막혔던 것 3개, 전부 실측으로 발견하고 고침**:
+1. **`Tool choice is none, but model called a tool` 에러**: tool 호출 결과를 OpenAI 정석대로
+   `role: assistant(tool_calls)` + `role: tool` 메시지로 다시 넣으면, gpt-oss-20b가 2단계에서
+   tools 파라미터를 안 줬는데도 또 tool_call을 시도함. `tool_choice="none"`을 명시해도
+   무시하고 또 시도하는 것까지 확인 — 결국 tool 결과를 OpenAI 프로토콜이 아니라 그냥
+   평범한 `system` 메시지 텍스트로 바꿔서 넣는 방식으로 우회(2단계는 tools 자체를 몰라서
+   다시 부를 수가 없어짐).
+2. **검색 결과가 있는데도 "못 찾았다"고 답하는 비일관성**: 같은 질문을 반복 호출해보니
+   gpt-oss-20b가 10번 중 1~2번꼴로 도구 결과를 무시하고 거부 답변을 냄. 완전히 없앨 수는
+   없어서(모델 자체의 확률적 한계), tool 결과가 비어있지 않은 경우엔 스트리밍 전에 먼저
+   non-stream으로 받아 "찾지 못했다"류 문구가 있는지 검사하고, 있으면 한 번 더 강하게
+   재시도하는 검증 단계를 추가. 완성된 텍스트를 청크로 쪼개 SSE로 흉내내서 내려주므로
+   FE 입장에서는 실시간 스트리밍과 차이 없음. (거부 문구 검사는 조사가 끼어들면
+   고정 문자열 매칭이 깨져서 — 예: "확인할 수 없" vs "확인할 수는 없" — "부정 어미"와
+   "확인/검색 관련 단어"가 각각 등장하는지로 느슨하게 판단하도록 조정.)
+3. **도구 없이 답할 때 책 제목/저자를 지어내서 추천**: "책 읽을 마음이 안 생겨" 같은 일반
+   대화에서 도구 호출 없이 구체적인 책 제목·저자 조합을 실존하는 것처럼 추천하는 걸 확인
+   (예: 존재 확인 안 된 조합). 시스템 프롬프트에 "구체적인 책 제목/저자를 언급할 땐
+   반드시 search_books로 실존 여부부터 확인하라"를 명시해서 해결 — 이후 추천은 전부
+   실제 카카오 검색 결과 기반(실제 구매 링크 포함)으로 나옴.
+
+curl로 다양한 케이스(가격 질문 10회 반복, 검색, 추천, 도구 불필요한 일상 대화) 반복
+검증. 베스트셀러(교보 스크래핑)는 다음 작업으로 분리.
