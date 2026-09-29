@@ -41,7 +41,9 @@ async def summarize(data: SummarizeRequest, x_internal_secret: str = Header(defa
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"제목: {data.title}\n\n본문: {plain_content}"},
         ],
-        max_tokens=512,
+        # openai/gpt-oss-20b는 답변 전에 쓰는 내부 추론 토큰도 max_tokens에 포함돼서,
+        # 긴 글이면 512로는 추론만 하다 끝나 빈 답이 올 수 있음(book-info에서 겪은 것과 같은 문제).
+        max_tokens=1536,
     )
     text = completion.choices[0].message.content or ""
 
@@ -50,5 +52,9 @@ async def summarize(data: SummarizeRequest, x_internal_secret: str = Header(defa
         for line in text.splitlines()
         if line.strip().lstrip("-•").strip()
     ]
+
+    if not bullets:
+        # 빈 요약을 200으로 돌려주면 호출한 쪽이 기존 요약을 빈 값으로 덮어쓸 수 있음
+        raise HTTPException(status_code=502, detail="empty summary from model")
 
     return {"summary": bullets}
