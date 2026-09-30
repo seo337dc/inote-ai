@@ -9,9 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
+from app.logging_config import register_error_handlers, setup_logging
 from app.routers import book_info, chat, conversations, reading_chat, sessions, summarize
 
+setup_logging()
+
 app = FastAPI(title="inote-ai")
+register_error_handlers(app)
 
 allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3011").split(",")
 

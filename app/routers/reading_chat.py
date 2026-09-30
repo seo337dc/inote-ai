@@ -107,17 +107,21 @@ async def reading_chat_stream(data: ReadingChatRequest):
     if not has_nonempty_result:
         # 도구를 안 썼거나(일반 대화), 도구 결과가 원래 비어있는 경우 — 그대로 실시간 스트리밍.
         def generate():
-            stream = client.chat.completions.create(
-                model=MODEL,
-                messages=groq_messages,
-                max_tokens=1024,
-                stream=True,
-            )
-            for chunk in stream:
-                text = chunk.choices[0].delta.content or ""
-                if text:
-                    yield f"data: {json.dumps({'text': text})}\n\n"
-            yield "data: [DONE]\n\n"
+            try:
+                stream = client.chat.completions.create(
+                    model=MODEL,
+                    messages=groq_messages,
+                    max_tokens=1024,
+                    stream=True,
+                )
+                for chunk in stream:
+                    text = chunk.choices[0].delta.content or ""
+                    if text:
+                        yield f"data: {json.dumps({'text': text})}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception:
+                logger.exception("reading chat stream failed")
+                raise
 
         return StreamingResponse(generate(), media_type="text/event-stream", headers=headers)
 

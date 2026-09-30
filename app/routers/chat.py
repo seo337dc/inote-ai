@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Optional
 
@@ -11,6 +12,8 @@ from pydantic import BaseModel
 
 from app.routers.conversations import save_message, upsert_session
 from app.services.ownership import is_owner
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -63,21 +66,26 @@ async def chat_stream(data: ChatRequest):
     ]
 
     def generate():
-        full_text = ""
-        stream = client.chat.completions.create(
-            model=MODEL,
-            messages=groq_messages,
-            max_tokens=1024,
-            stream=True,
-        )
-        for chunk in stream:
-            text = chunk.choices[0].delta.content or ""
-            if text:
-                full_text += text
-                yield f"data: {json.dumps({'text': text})}\n\n"
-        yield "data: [DONE]\n\n"
-        if can_persist:
-            save_message(data.session_id, "assistant", full_text)
+        try:
+            full_text = ""
+            stream = client.chat.completions.create(
+                model=MODEL,
+                messages=groq_messages,
+                max_tokens=1024,
+                stream=True,
+            )
+            for chunk in stream:
+                text = chunk.choices[0].delta.content or ""
+                if text:
+                    full_text += text
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+            yield "data: [DONE]\n\n"
+            if can_persist:
+                save_message(data.session_id, "assistant", full_text)
+        except Exception:
+            # 스트리밍 도중의 실패는 이미 응답이 시작돼 전역 에러 핸들러로 못 가므로 여기서 남긴다
+            logger.exception("chat stream failed (session_id=%s)", data.session_id)
+            raise
 
     return StreamingResponse(
         generate(),
