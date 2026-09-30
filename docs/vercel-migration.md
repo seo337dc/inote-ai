@@ -1,7 +1,7 @@
 # inote-ai 호스팅 이전 — Render → Vercel
 
 > 이 레포(`inote-ai`)의 이전 기록. 전체 배경·원인·결정은 `inote` 레포의 `docs/infra/hosting-migration.md`,
-> BE 쪽(Koyeb)은 `inote-server` 레포의 `docs/koyeb-migration.md` 참고. Notion 정리용 원본.
+> DB 이전(Neon → Supabase)은 `inote-server` 레포의 `docs/supabase-migration.md` 참고. Notion 정리용 원본.
 > 시작: 2026-09-30 / 상태: 🟡 구성 완료, Vercel 배포 대기
 
 ---
@@ -38,11 +38,13 @@ Render 무료 웹 서비스 2개를 10분마다 깨워 두다가 월 750시간 �
 - [x] Vercel 프로젝트 생성(GitHub `inote-ai` 저장소 가져오기, Framework FastAPI 자동 인식) — 배포 주소 `https://inote-ai-cyan.vercel.app` (2026-09-30)
 - [x] 환경 변수 입력 (아래 표) — `PYTHON_VERSION`은 Render 전용이라 입력하지 않음
 - [x] 배포 후 검증(일부): `/health`, `/docs`, `/summarize`(200, 한국어 요약), 채팅 스트리밍(SSE 정상), CORS(`https://inote-main.vercel.app` 허용), DB 조회·저장(세션 생성 → 목록 조회 → 삭제 정리) (2026-09-30)
-- [ ] 배포 후 검증(BE 필요): 글에 연결된 채팅(BE에서 작성자 확인), 독서 기록 AI(카카오 도서 검색 포함) — BE를 Koyeb로 옮긴 뒤
+- [ ] 배포 후 검증(BE 필요): 글에 연결된 채팅(BE에서 작성자 확인), 독서 기록 AI(카카오 도서 검색 포함) — Render BE가 재개된 뒤
 - [x] 진단용 엔드포인트 `/health/db` 추가(internal 전용) — 접속 성공 여부, 에러 종류, `DATABASE_URL` 구조(비밀번호 제외), AI 테이블 존재 여부 확인
 - [x] 에러 로그 정책 적용 — 처리되지 않은 에러와 5xx는 traceback·`request_id`(`x-vercel-id`)와 함께 로그에 남김, 스트리밍 중 실패도 기록(요청 본문·헤더·키는 기록하지 않음)
-- [ ] BE의 `INOTE_AI_URL`, FE의 `NEXT_PUBLIC_AI_API_URL`을 새 주소로 교체
-- [ ] 마무리: `render.yaml`·`runtime.txt` 정리, `README.md`·`CLAUDE.md`의 배포 정보 최신화, cron-job의 "inote ai 서버 슬립 해제" 삭제
+- [x] BE(Render)의 `INOTE_AI_URL`을 Vercel 주소로 교체 (2026-09-30)
+- [ ] FE(Vercel)의 `NEXT_PUBLIC_AI_API_URL`을 새 주소로 교체·재배포 — 확인 필요
+- [x] Render의 `inote-ai` 서비스, cron-job의 "inote ai 서버 슬립 해제" 작업 삭제 (2026-09-30)
+- [ ] 마무리: `render.yaml`·`runtime.txt` 정리(더 이상 쓰지 않음), `README.md`·`CLAUDE.md`의 배포 정보 최신화
 
 ## 4. 환경 변수 (값은 적지 않는다)
 
@@ -51,7 +53,7 @@ Render 무료 웹 서비스 2개를 10분마다 깨워 두다가 월 750시간 �
 | `GROQ_API_KEY` | |
 | `DATABASE_URL` | Neon **pooled** 주소(호스트에 `-pooler`) |
 | `INTERNAL_SECRET` | BE와 동일한 값 |
-| `INOTE_SERVER_URL` | BE 주소 — Koyeb 이전 전까지는 기존 Render 주소, 이전 후 새 주소로 교체 |
+| `INOTE_SERVER_URL` | BE 주소(Render) + `/api/v1` |
 | `ALLOWED_ORIGINS` | FE 주소 (쉼표로 여러 개) |
 | `KAKAO_REST_API_KEY` | 독서 기록 책 검색용 |
 
