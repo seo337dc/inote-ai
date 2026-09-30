@@ -1,0 +1,15 @@
+# Vercel 배포 번들에 넣지 않을 것 (Python은 프로젝트 파일을 전부 번들에 포함하므로 반드시 제외)
+venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+*.log
+DEV_LOG.md
+README.md
+CLAUDE.md
+render.yaml
+runtime.txt
+schema.sql
+.git/
