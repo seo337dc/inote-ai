@@ -78,6 +78,19 @@ async def health_db(x_internal_secret: str = Header(default="")):
             with conn.cursor() as cur:
                 cur.execute("select 1")
                 cur.fetchone()
+                # 접속만 되고 테이블이 없는 경우(엉뚱한 DB를 가리킬 때)도 잡는다
+                cur.execute(
+                    "select table_name from information_schema.tables "
+                    "where table_schema = 'public' "
+                    "and table_name in ('conversation_sessions', 'conversations')"
+                )
+                found = {row[0] for row in cur.fetchall()}
+        missing = sorted({"conversation_sessions", "conversations"} - found)
+        if missing:
+            return JSONResponse(
+                status_code=503,
+                content={"db": "connected-but-missing-tables", "missing_tables": missing, **info},
+            )
         return {"db": "ok", **info}
     except Exception as e:  # noqa: BLE001 — 진단용이라 모든 예외를 잡아서 알려준다
         password = urlsplit(url.strip()).password or ""
