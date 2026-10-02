@@ -32,3 +32,8 @@ comment on table conversations is '세션 하나에서 나눈 LLM 대화 원문.
 comment on column conversations.session_id is 'conversation_sessions.id 참조';
 comment on column conversations.role is 'user 또는 assistant';
 comment on column conversations.content is '메시지 본문';
+
+-- 접속 계정(postgres)은 RLS를 우회하므로 서비스 동작에는 영향이 없다.
+-- 혹시 Data API 노출 설정이 바뀌어도 anon/authenticated로는 접근되지 않게 RLS를 켜 둔다.
+alter table conversation_sessions enable row level security;
+alter table conversations enable row level security;
