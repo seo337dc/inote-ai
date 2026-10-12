@@ -249,3 +249,23 @@ curl로 다양한 케이스(가격 질문 10회 반복, 검색, 추천, 도구 �
 - **`.vercelignore`에 `docker-compose.dev.yml`·`docker/`·`scripts/` 추가**(Python 함수는 프로젝트 파일을 전부 번들에 넣는다). `.gitignore`는 `.env.*`로 넓혔다.
 - **아직 안 한 것**: 운영 AI DB(Supabase)에는 적용하지 않았다. 적용 전에 그 프로젝트에서 `vector` 확장을 켤 수 있는지(무료 플랜 포함)와
   접속 계정의 `search_path`에 `extensions`가 있는지 확인해야 한다. 다음은 A5(임베딩 API).
+
+## 2026-10-12 — 글 임베딩 API (KURE 기획 A5)
+
+`inote-server`가 부르는 내부 API 3개(`app/routers/embeddings.py`). 임베딩 서비스(`inote-embedder`)를 부르는 것도 이 서비스뿐이다.
+
+- **`PUT /embeddings/posts/{id}`**: 제목·HTML 본문 → 텍스트 정리 → `content_hash`가 같고 모델도 같으면 `unchanged`(임베딩 서비스를 안 부름, 약 37ms),
+  아니면 벡터를 만들어 upsert. **`DELETE`**: 없어도 오류가 아니다. **`POST /embeddings/similar`**: 저장된 글(`postId`) 또는 저장 전 텍스트 기준.
+- **핵심 규칙 — 후보 id 안에서만**: BE가 `candidateIds`를 넘기고 SQL이 `post_id = any(후보)`로 제한한다(후보 밖은 가까워도 안 나옴, 빈 후보는 임베딩 서비스를 부르지 않고 빈 결과).
+  공개 여부는 이 서비스가 모른다. 6개 DB 테스트가 이 규칙을 지키고, 일부러 제한을 끄면 6개가 실패하는 것도 확인했다.
+- **`operator(extensions.<=>)`로 연산자에 스키마를 붙여 쓴다**: 운영 Supabase 접속 계정의 `search_path`에 `extensions`가 있는지 아직 모르므로 의존하지 않게 했다
+  (`search_path = public`인 접속에서도 동작하는 테스트 포함).
+- **새 파일**: `app/services/{text_prep,embedder_client,embedding_store,internal_auth}.py`. `text_prep`은 `inote-embedder` 실험에서 검증한 것을 옮겼다.
+  `internal_auth`는 새 엔드포인트용 비밀키 검사(서버에 `INTERNAL_SECRET`이 없으면 전부 거절, 상수 시간 비교). 기존 라우터는 건드리지 않았다.
+- **환경 변수**: `EMBEDDER_URL`(없으면 임베딩 API는 503), `EMBEDDER_SECRET`(`INTERNAL_SECRET`과 다른 값), `EMBEDDER_MODEL`.
+- **테스트 59개**(`tests/`, unittest): 텍스트 정리, 임베딩 클라이언트(가짜 HTTP: 상태·시간 초과·잘못된 응답·차원), API(가짜 저장소·임베딩 서비스: 인증·멱등·검증·후보 규칙),
+  실제 pgvector DB 통합 13개(`TEST_DATABASE_URL`이 있을 때만).
+- **종단 확인(로컬 서버 + 개발 DB + 실제 임베딩 서비스)**: 실험 DB의 공개 글 22개를 API로 저장(글당 평균 4.7초, 최대 11.9초 — Vercel Hobby 함수는 기본·최대 300초라 여유),
+  재저장은 `unchanged`, 후보에서 가장 가까운 글을 빼면 그 글이 절대 안 나오고, 저장 전 텍스트 조회도 동작. 이웃 점수가 실험(`inote-embedder`)과 같다(Docker 글 0.778/0.764/0.662).
+- **아직 안 한 것**: 운영 배포(운영 AI DB에 `vector` 확장·테이블 적용, 임베딩 서비스 호스팅, `EMBEDDER_*` 설정), `inote-server` 연동(다음 A6).
+

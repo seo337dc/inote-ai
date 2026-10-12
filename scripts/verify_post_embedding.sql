@@ -26,7 +26,7 @@ begin
   join pg_type ty on ty.oid = a.atttypid
   join pg_namespace n on n.oid = ty.typnamespace
   where a.attrelid = 'post_embedding'::regclass and a.attname = 'embedding';
-  assert t = 'vector(1024)' and sch = 'extensions',
+  assert t in ('vector(1024)', 'extensions.vector(1024)') and sch = 'extensions',
     format('embedding 칸 타입이 예상(extensions의 vector(1024))과 다릅니다: %s (스키마 %s)', t, sch);
   raise notice 'OK 1-1 embedding 타입: % (스키마 %)', t, sch;
 
@@ -44,9 +44,12 @@ begin
     '다른 DB의 글을 가리키는 외래 키가 있으면 안 됩니다';
   raise notice 'OK 1-4 외래 키 없음(다른 DB의 글 id)';
 
-  assert current_setting('search_path') like '%extensions%',
-    format('search_path에 extensions가 없어 vector 연산자를 스키마 이름 없이 못 씁니다: %s', current_setting('search_path'));
-  raise notice 'OK 1-5 search_path: %', current_setting('search_path');
+  -- 앱 쿼리는 operator(extensions.<=>)로 스키마까지 붙여 쓰므로 search_path에 의존하지 않는다. 여기서는 현황만 알려 준다.
+  if current_setting('search_path') like '%extensions%' then
+    raise notice 'OK 1-5 search_path에 extensions 있음: %', current_setting('search_path');
+  else
+    raise notice '참고 1-5 search_path에 extensions가 없다(앱 쿼리는 스키마를 붙여 써서 영향 없음): %', current_setting('search_path');
+  end if;
 end $$;
 
 -- 2) 저장·갱신 -------------------------------------------------------------------
@@ -76,13 +79,13 @@ end $$;
 do $$
 declare ranked text; d_ab float8; d_ad float8; d_ac float8;
 begin
-  -- 연산자가 스키마 이름 없이 동작하는지(search_path)도 함께 확인된다
-  select string_agg(post_id, ',' order by embedding <=> pg_temp.v(1, 1.0, 2, 0.0)) into ranked from post_embedding;
+  -- 앱 쿼리와 같은 형태(operator(extensions.<=>))로 확인한다
+  select string_agg(post_id, ',' order by embedding operator(extensions.<=>) pg_temp.v(1, 1.0, 2, 0.0)) into ranked from post_embedding;
   assert ranked = 'A,B,C,D', format('가까운 순서가 A,B,C,D가 아닙니다: %s', ranked);
 
-  select (embedding <=> pg_temp.v(1, 1.0, 2, 0.0)) into d_ab from post_embedding where post_id = 'B';
-  select (embedding <=> pg_temp.v(1, 1.0, 2, 0.0)) into d_ac from post_embedding where post_id = 'C';
-  select (embedding <=> pg_temp.v(1, 1.0, 2, 0.0)) into d_ad from post_embedding where post_id = 'D';
+  select (embedding operator(extensions.<=>) pg_temp.v(1, 1.0, 2, 0.0)) into d_ab from post_embedding where post_id = 'B';
+  select (embedding operator(extensions.<=>) pg_temp.v(1, 1.0, 2, 0.0)) into d_ac from post_embedding where post_id = 'C';
+  select (embedding operator(extensions.<=>) pg_temp.v(1, 1.0, 2, 0.0)) into d_ad from post_embedding where post_id = 'D';
   assert d_ab < 0.05, format('거의 같은 방향인데 거리가 큽니다: %s', d_ab);
   assert abs(d_ac - 1.0) < 1e-6, format('직교 벡터의 코사인 거리는 1이어야 합니다: %s', d_ac);
   assert abs(d_ad - 2.0) < 1e-6, format('반대 방향의 코사인 거리는 2여야 합니다: %s', d_ad);
@@ -95,7 +98,7 @@ do $$
 declare ranked text;
 begin
   -- A(가장 가까움)를 후보에서 뺀다
-  select string_agg(post_id, ',' order by embedding <=> pg_temp.v(1, 1.0, 2, 0.0)) into ranked
+  select string_agg(post_id, ',' order by embedding operator(extensions.<=>) pg_temp.v(1, 1.0, 2, 0.0)) into ranked
   from post_embedding where post_id = any (array['B', 'C']);
   assert ranked = 'B,C', format('후보 안에서의 순서가 B,C가 아닙니다: %s', ranked);
 

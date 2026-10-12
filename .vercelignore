@@ -16,3 +16,4 @@ schema.sql
 docker-compose.dev.yml
 docker/
 scripts/
+tests/

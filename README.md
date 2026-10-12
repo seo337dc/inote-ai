@@ -33,6 +33,9 @@ inote (FE, Next.js)
 | GET | `/conversations/{session_id}` | 세션의 대화 이력 조회 (`user_id` 필수) |
 | GET | `/sessions` | 세션 목록 (`user_id` 필수, `q`로 검색) |
 | POST | `/summarize` | 글 내용 → 불릿 요약 (내부 전용, `x-internal-secret`) |
+| PUT | `/embeddings/posts/{post_id}` | 글 제목·HTML 본문 → KURE 벡터를 만들어 저장 (내용·모델이 같으면 다시 계산 안 함, 내부 전용) |
+| DELETE | `/embeddings/posts/{post_id}` | 글 벡터 삭제 (없어도 오류 아님, 내부 전용) |
+| POST | `/embeddings/similar` | **BE가 넘긴 후보 글 id 안에서만** 가까운 글 조회 — 저장된 글(`postId`) 또는 저장 전 텍스트(`title`+`content`) 기준 (내부 전용) |
 | GET | `/health` | 헬스 체크 |
 
 FastAPI가 기본 제공하는 Swagger UI를 그대로 씀 — 로컬 `http://localhost:8000/docs`, 배포
@@ -76,6 +79,31 @@ docker compose -f docker-compose.dev.yml --env-file .env.dev exec -T db psql -U 
 ```
 DB를 처음부터 다시 만들려면 `down -v`. 로컬 DB는 Supabase처럼 `extensions` 스키마에 `vector`를 설치하고 `search_path`에 `extensions`를 넣어 둔다(`docker/dev-db-init.sql`).
 
+### 글 임베딩 API (`/embeddings/*`)
+
+`inote-server`가 글 저장·삭제 때 부르고(실패해도 글 저장은 막지 않는다), 유사 글을 찾을 때는 **자기가 정한 "볼 수 있는 글 id 목록(`candidateIds`)"을 넘긴다.**
+이 서비스는 글의 공개 여부를 모르고, **후보 안에서만** 순위를 매긴다 → 후보 밖의 글은 가까워도 나오지 않는다. 설계: `inote` 레포 `docs/kure/PLAN.md`.
+
+```
+PUT  /embeddings/posts/{id}   { "title": "...", "content": "<p>HTML 본문</p>" }
+  → { "status": "embedded" | "unchanged", "model": "nlpai-lab/KURE-v1", "dim": 1024 }
+POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit": 5, "minScore": 0.6 }
+                           또는 { "title": "...", "content": "...", "candidateIds": [...] }   (저장 전 글)
+  → { "items": [{ "postId": "...", "score": 0.78 }], "sourceEmbedded": true }
+```
+- 임베딩 서비스(`EMBEDDER_URL`)가 없거나 응답이 없으면 임베딩이 필요한 요청은 **503** — 호출한 쪽이 기능만 숨기면 된다. 후보가 비어 있으면 임베딩 서비스를 부르지 않고 빈 결과.
+- 모든 요청에 `x-internal-secret` 필요. 서버에 `INTERNAL_SECRET`이 없으면 전부 503으로 거절한다.
+- 한도: 제목 500자, 본문 200만자, 후보 id 5000개, `limit` 1~50, `minScore` 0~1.
+
+### 테스트
+
+```bash
+venv/bin/python -m unittest discover -s tests -t .        # 모델·DB 없이 도는 테스트 (DB 통합 테스트는 건너뜀)
+
+# 실제 pgvector DB로 후보 id 제한 등을 확인하는 통합 테스트 (로컬 개발 DB, 운영 DB로 돌리지 않는다)
+TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_dev" venv/bin/python -m unittest discover -s tests -t .
+```
+
 ## 환경변수
 
 | 변수 | 설명 |
@@ -85,6 +113,9 @@ DB를 처음부터 다시 만들려면 `down -v`. 로컬 DB는 Supabase처럼 `e
 | `INTERNAL_SECRET` | `inote-server`와 동일한 값이어야 함 (서비스 간 인증) |
 | `INOTE_SERVER_URL` | `inote-server`의 `/api/v1` 베이스 URL (글 작성자 확인용) |
 | `ALLOWED_ORIGINS` | CORS 허용 origin, 콤마로 여러 개 구분 (FE 도메인) |
+| `EMBEDDER_URL` | 임베딩 서비스(`inote-embedder`) 주소. 없으면 임베딩 API는 503 (글 저장은 영향 없음) |
+| `EMBEDDER_SECRET` | 임베딩 서비스가 기대하는 비밀키 — `INTERNAL_SECRET`과는 **다른 값** |
+| `EMBEDDER_MODEL` | 기대하는 모델 이름(기본 `nlpai-lab/KURE-v1`) — 저장된 벡터와 다르면 다시 계산 |
 
 ## DB 스키마
 
