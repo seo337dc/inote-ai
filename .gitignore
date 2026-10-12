@@ -5,7 +5,9 @@ __pycache__/
 
 # env
 .env
+.env.*
 !.env.example
+!.env.dev.example
 
 # misc
 .DS_Store

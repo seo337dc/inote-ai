@@ -57,6 +57,25 @@ cp .env.example .env   # 값 채우기 (아래 환경변수 참고)
 uvicorn app.main:app --reload --port 8000
 ```
 
+### 로컬 개발 DB (도커, Postgres + pgvector)
+
+운영 AI DB(Supabase 별도 프로젝트)와 분리된 이 PC 안의 DB. 새 테이블·확장은 여기서 먼저 검증한다.
+
+```bash
+cp .env.dev.example .env.dev      # AI_DEV_DB_PASSWORD를 채운다: openssl rand -hex 16 (.env.dev는 git에 올리지 않는다)
+docker compose -f docker-compose.dev.yml --env-file .env.dev up -d    # 처음 한 번 schema.sql이 자동 적용됨 (localhost:5434)
+
+# 이 DB로 서버 띄우기 (.env의 운영 DATABASE_URL을 덮어쓴다)
+DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_dev" uvicorn app.main:app --reload --port 8000
+
+# schema.sql을 고쳤다면 이미 만든 DB에 다시 적용 (모든 문장이 if not exists라 여러 번 실행해도 안전)
+docker compose -f docker-compose.dev.yml --env-file .env.dev exec -T db psql -U ai -d inote_ai_dev -v ON_ERROR_STOP=1 < schema.sql
+
+# post_embedding이 설계대로 동작하는지 자체 검증 (끝에서 ROLLBACK, 데이터 안 남음)
+docker compose -f docker-compose.dev.yml --env-file .env.dev exec -T db psql -U ai -d inote_ai_dev -v ON_ERROR_STOP=1 < scripts/verify_post_embedding.sql
+```
+DB를 처음부터 다시 만들려면 `down -v`. 로컬 DB는 Supabase처럼 `extensions` 스키마에 `vector`를 설치하고 `search_path`에 `extensions`를 넣어 둔다(`docker/dev-db-init.sql`).
+
 ## 환경변수
 
 | 변수 | 설명 |
@@ -69,7 +88,9 @@ uvicorn app.main:app --reload --port 8000
 
 ## DB 스키마
 
-`schema.sql` 참고 — `conversation_sessions`(세션) + `conversations`(메시지, `session_id` FK).
+`schema.sql` 참고 — `conversation_sessions`(세션) + `conversations`(메시지, `session_id` FK) + `post_embedding`(글 임베딩 벡터, pgvector).
+
+`post_embedding`은 **벡터만** 저장한다 — 글의 공개 여부·작성자·카테고리·본문은 복사해 두지 않는다(공개 범위는 `inote-server`가 후보 글 id로 정해 넘긴다). 설계는 `inote` 레포 `docs/kure/PLAN.md` 참고.
 
 ## 배포
 

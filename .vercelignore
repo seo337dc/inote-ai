@@ -13,3 +13,6 @@ render.yaml
 runtime.txt
 schema.sql
 .git/
+docker-compose.dev.yml
+docker/
+scripts/

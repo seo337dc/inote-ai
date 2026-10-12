@@ -232,3 +232,20 @@ LangChain 대신 Groq 네이티브 function calling으로 구현(`POST /reading-
 
 curl로 다양한 케이스(가격 질문 10회 반복, 검색, 추천, 도구 불필요한 일상 대화) 반복
 검증. 베스트셀러(교보 스크래핑)는 다음 작업으로 분리.
+
+## 2026-10-12 — 글 임베딩 저장소 준비 (KURE 기획 A4): 로컬 개발 DB + `post_embedding`
+
+`inote` 레포 `docs/kure/PLAN.md`의 결정(벡터는 AI DB가 소유, 공개 여부는 BE가 후보 글 id로 판정)에 따라 저장소부터 준비.
+
+- **로컬 개발 DB**: `docker-compose.dev.yml` — Postgres 17 + pgvector(`pgvector/pgvector:pg17`), `localhost:5434`, DB `inote_ai_dev`.
+  운영 DB와 분리되어 새 테이블·확장을 먼저 검증한다. 처음 만들 때 `docker/dev-db-init.sql`(Supabase처럼 `extensions` 스키마·`search_path`)과
+  `schema.sql`이 자동 적용된다. 비밀번호는 `.env.dev`(gitignore)에 둔다.
+- **`schema.sql`에 `post_embedding` 추가**: `post_id`(PK, BE `Post.id` — 다른 DB라 외래 키 없음), `model`, `content_hash`,
+  `embedding extensions.vector(1024)`, `embedded_at`, RLS 켬. **공개 여부·작성자·카테고리·본문 칸은 일부러 없다**(복사본이 어긋나면 비공개 글이 샌다).
+  모든 문장이 멱등(`if not exists`)이라 이미 만든 DB에 다시 적용해도 안전.
+- **자체 검증** `scripts/verify_post_embedding.sql`: 구조(타입·RLS·복사본 칸 없음·외래 키 없음·`search_path`), 저장·upsert,
+  코사인 거리 순서(`<=>`), **후보 id 안에서만 순위(후보 밖·빈 후보·벡터 없는 후보 안전)**, 삭제, 잘못된 차원 거절. 끝에서 ROLLBACK.
+  RLS 끄기·공개 여부 칸 추가·외래 키 추가를 일부러 해 보면 각각 검증이 실패하는 것도 확인했다.
+- **`.vercelignore`에 `docker-compose.dev.yml`·`docker/`·`scripts/` 추가**(Python 함수는 프로젝트 파일을 전부 번들에 넣는다). `.gitignore`는 `.env.*`로 넓혔다.
+- **아직 안 한 것**: 운영 AI DB(Supabase)에는 적용하지 않았다. 적용 전에 그 프로젝트에서 `vector` 확장을 켤 수 있는지(무료 플랜 포함)와
+  접속 계정의 `search_path`에 `extensions`가 있는지 확인해야 한다. 다음은 A5(임베딩 API).
