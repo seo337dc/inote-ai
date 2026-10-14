@@ -2,7 +2,7 @@
 설계: inote 레포 docs/kure/PLAN.md 6절 D의 1차 범위(결정 17).
 
 엔드포인트
-  POST /posts-chat/stream   { messages: [{role, content}], user_id?, session_id? }
+  POST /posts-chat/stream   { messages: [{role, content}], user_id?, session_id?, use_search? }
   → SSE (기존 /chat/stream과 같은 형식)
      data: {"text": "..."}                         답변 조각 (여러 번)
      data: {"sources": [...], "mode": "...", ...}  마지막에 한 번 — 출처 글 목록과 답변 종류
@@ -11,6 +11,7 @@
 동작
 - 질문(마지막 user 메시지)으로 공개 글을 검색한다. 질문이 짧은 후속 질문이면 앞 질문을 붙여 검색한다(build_search_query). 기준 점수 이상인 글이 있으면 그 글만 근거로 답하고(mode="posts"),
   없거나 검색을 못 하면 "내 글에는 관련 내용이 없어요"를 먼저 알린 뒤 일반 답변을 한다(mode="general", 웹 조회는 2차).
+- use_search=false(기본 true)면 글 검색 없이 일반 답변만 한다(안내 문구도 없음) — "과제나 업무 도와줘"처럼 내 글과 상관없는 대화용.
 - 링크는 모델이 쓰지 않는다. sources의 글 id로 FE가 주소를 만들고, 답변의 [1][2]는 sources 순서를 가리킨다.
 - 대화 저장: user_id와 session_id가 둘 다 있을 때만(로그인 사용자) 기존 채팅과 같은 테이블에 kind="posts"로 저장한다 —
   질문, 그리고 답변과 출처 글(이력에서 카드를 복원하려고). 없으면 저장하지 않는 휘발성 채팅이다(게스트).
@@ -31,7 +32,7 @@ from groq import Groq
 from pydantic import BaseModel, Field, model_validator
 
 from app.routers.conversations import save_message, upsert_session
-from app.services.post_search import FoundPost, PostSearcher, get_searcher
+from app.services.post_search import FoundPost, PostSearcher, SearchOutcome, get_searcher
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class PostsChatMessage(BaseModel):
 class PostsChatRequest(BaseModel):
     user_id: Optional[str] = None
     session_id: Optional[str] = None  # user_id와 함께 있을 때만 대화를 저장한다
+    use_search: bool = True  # false면 내 글을 검색하지 않고 일반 답변만 한다
     messages: List[PostsChatMessage] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -132,7 +134,10 @@ async def posts_chat_stream(
         await asyncio.to_thread(upsert_session, data.session_id, data.user_id, kind="posts")
         await asyncio.to_thread(save_message, data.session_id, "user", question)
 
-    outcome = await searcher.search(build_search_query(history))
+    if data.use_search:
+        outcome = await searcher.search(build_search_query(history))
+    else:
+        outcome = SearchOutcome("skipped", [])  # 검색하지 않음 — 일반 답변, 안내 문구 없음
 
     if outcome.status == "found":
         system, notice = SYSTEM_POSTS, ""
@@ -141,7 +146,7 @@ async def posts_chat_stream(
         history[last] = {"role": "user", "content": f"[글]\n{_context(outcome.posts)}\n\n질문: {question}"}
     else:
         system = SYSTEM_GENERAL
-        notice = NOTICE_UNAVAILABLE if outcome.status == "unavailable" else NOTICE_NONE
+        notice = {"unavailable": NOTICE_UNAVAILABLE, "skipped": ""}.get(outcome.status, NOTICE_NONE)
 
     messages = [{"role": "system", "content": system}, *history]
     sources = [

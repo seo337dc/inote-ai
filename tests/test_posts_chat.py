@@ -275,6 +275,27 @@ class PostsChatApiTest(unittest.TestCase):
         self.assertEqual(self.llm.calls[0][0], {"role": "system", "content": posts_chat.SYSTEM_GENERAL})
         self.assertNotIn("[글]", self.llm.calls[0][-1]["content"])
 
+    def test_use_search_false_skips_search_and_answers_in_general_mode_without_notice(self):
+        resp = self.ask([{"role": "user", "content": "보고서 목차 짜줘"}], use_search=False)
+        events = parse(resp)
+        self.assertEqual(self.embedder.calls, [])
+        self.assertEqual(self.store.calls, [])
+        self.assertEqual(self.server.detail_calls, [])
+        self.assertEqual(self.llm.calls[0][0], {"role": "system", "content": posts_chat.SYSTEM_GENERAL})
+        self.assertEqual(self.llm.calls[0][-1], {"role": "user", "content": "보고서 목차 짜줘"})  # 글을 붙이지 않는다
+        self.assertFalse(text_of(events).startswith("내 글에는"))
+        final = final_of(events)
+        self.assertEqual((final["mode"], final["search"], final["sources"]), ("general", "skipped", []))
+
+    def test_use_search_false_still_saves_the_conversation(self):
+        self.ask(use_search=False, user_id="u1", session_id="s1")
+        self.assertEqual([k for k, *_ in self.saved], ["session", "message", "message"])
+        self.assertEqual(self.saved[-1][1][3], [])  # 출처 없음
+
+    def test_search_is_on_by_default(self):
+        self.ask()
+        self.assertEqual(len(self.embedder.calls), 1)
+
     def test_no_public_posts_means_no_search_calls(self):
         self.server.ids = []
         events = parse(self.ask())
