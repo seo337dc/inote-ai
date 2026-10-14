@@ -9,7 +9,7 @@
      data: [DONE]
 
 동작
-- 질문(마지막 user 메시지)으로 공개 글을 검색한다. 기준 점수 이상인 글이 있으면 그 글만 근거로 답하고(mode="posts"),
+- 질문(마지막 user 메시지)으로 공개 글을 검색한다. 질문이 짧은 후속 질문이면 앞 질문을 붙여 검색한다(build_search_query). 기준 점수 이상인 글이 있으면 그 글만 근거로 답하고(mode="posts"),
   없거나 검색을 못 하면 "내 글에는 관련 내용이 없어요"를 먼저 알린 뒤 일반 답변을 한다(mode="general", 웹 조회는 2차).
 - 링크는 모델이 쓰지 않는다. sources의 글 id로 FE가 주소를 만들고, 답변의 [1][2]는 sources 순서를 가리킨다.
 - 1차 제약: 대화 기록을 저장하지 않는다(요청에 담긴 대화로만 답한다). user_id는 쓰지 않는다(공개 글만 다루므로).
@@ -37,6 +37,10 @@ MODEL = "openai/gpt-oss-20b"
 MAX_QUERY_CHARS = 1000
 MAX_MESSAGE_CHARS = 4000
 MAX_HISTORY = 10  # 요청에 담긴 대화 중 최근 이만큼만 쓴다
+# 이 글자 수 이하인 질문은 "하나밖에 없는데?"처럼 앞 질문에 기대는 후속 질문으로 보고, 검색할 때 앞 질문을 앞에 붙인다.
+# (짧은 말 하나만 검색하면 주제를 알 수 없어 엉뚱한 글이 나온다. 새 주제의 짧은 질문이면 앞 질문이 조금 섞이는 정도의 손해)
+SHORT_FOLLOWUP_CHARS = 12
+MAX_QUERY_PARTS = 3  # 후속 질문이 이어져도 이만큼의 사용자 질문까지만 합친다
 MAX_TOKENS = 1536  # gpt-oss는 답변 전에 쓰는 추론 토큰도 포함돼서 넉넉히 둔다
 
 SYSTEM_POSTS = (
@@ -89,6 +93,18 @@ def get_llm() -> GroqLLM:
     return GroqLLM()
 
 
+def build_search_query(history: List[dict]) -> str:
+    """검색에 쓸 질문 — 마지막 질문이 짧으면 바로 앞 사용자 질문을 붙인다(앞 질문이 충분히 길면 거기서 멈춘다).
+    답변 모델에게 주는 질문은 그대로 마지막 질문이고, 이 값은 글을 찾는 데만 쓴다."""
+    user_texts = [m["content"].strip() for m in history if m["role"] == "user" and m["content"].strip()]
+    parts = [user_texts[-1]]
+    for earlier in reversed(user_texts[:-1]):
+        if len(parts[0]) > SHORT_FOLLOWUP_CHARS or len(parts) >= MAX_QUERY_PARTS:
+            break
+        parts.insert(0, earlier)
+    return " ".join(parts)[-MAX_QUERY_CHARS:]
+
+
 def _sse(payload) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
@@ -106,7 +122,7 @@ async def posts_chat_stream(
     history = [{"role": m.role, "content": m.content} for m in data.messages][-MAX_HISTORY:]
     question = next(m["content"] for m in reversed(history) if m["role"] == "user")
 
-    outcome = await searcher.search(question)
+    outcome = await searcher.search(build_search_query(history))
 
     if outcome.status == "found":
         system, notice = SYSTEM_POSTS, ""

@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 # 질문과 글 전체를 비교하면 점수가 같은 주제여도 0.5~0.65대로 나온다(로컬 확인). A7 평가로 확정하기 전의 임시값.
 DEFAULT_MIN_SCORE = 0.5
+# 기준 점수에 못 미쳐도 1등 점수와 이만큼 이내면 같이 보여준다(같은 주제의 글인데 점수가 조금 낮은 경우).
+# 로컬 확인: 모니터링 1편 0.55 / 2편 0.47(차이 0.08) / 관련 없는 글 0.44~0.46(차이 0.09 이상). A7 평가로 확정하기 전의 임시값.
+DEFAULT_SCORE_MARGIN = 0.09
 DEFAULT_LIMIT = 3
 MAX_CHARS_PER_POST = 1500
 SERVER_TIMEOUT = 5.0
@@ -41,6 +44,18 @@ def get_min_score() -> float:
     except ValueError:
         return DEFAULT_MIN_SCORE
     return value if 0.0 <= value <= 1.0 else DEFAULT_MIN_SCORE
+
+
+def get_score_margin() -> float:
+    """POSTS_CHAT_SCORE_MARGIN(0~1). 없거나 범위를 벗어나면 기본값. 0이면 1등과의 차이를 보지 않는다."""
+    raw = os.environ.get("POSTS_CHAT_SCORE_MARGIN", "").strip()
+    if not raw:
+        return DEFAULT_SCORE_MARGIN
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_SCORE_MARGIN
+    return value if 0.0 <= value <= 1.0 else DEFAULT_SCORE_MARGIN
 
 
 @dataclass(frozen=True)
@@ -94,12 +109,14 @@ class PostSearcher:
         store: EmbeddingStore,
         min_score: Optional[float] = None,
         limit: int = DEFAULT_LIMIT,
+        score_margin: Optional[float] = None,
     ):
         self._server = server
         self._embedder = embedder
         self._store = store
         self._min_score = get_min_score() if min_score is None else min_score
         self._limit = limit
+        self._margin = get_score_margin() if score_margin is None else score_margin
 
     async def search(self, query: str) -> SearchOutcome:
         try:
@@ -108,9 +125,12 @@ class PostSearcher:
                 return SearchOutcome("none", [])
             # KURE 호출과 DB 조회는 동기 코드라 스레드에서 돌려 이벤트 루프를 막지 않는다
             embedded = await asyncio.to_thread(self._embedder.embed, [query])
-            matches = await asyncio.to_thread(
-                self._store.similar_to_vector, embedded.embeddings[0], ids, self._limit, self._min_score
+            # 기준보다 낮게 한도를 풀어서 가져온 뒤, 1등이 기준을 넘을 때만 아래에서 다시 거른다
+            floor = round(max(0.0, self._min_score - self._margin), 4)
+            candidates = await asyncio.to_thread(
+                self._store.similar_to_vector, embedded.embeddings[0], ids, self._limit, floor
             )
+            matches = self._select(candidates)
             if not matches:
                 return SearchOutcome("none", [])
             details = await asyncio.gather(
@@ -138,6 +158,17 @@ class PostSearcher:
                 )
             )
         return SearchOutcome("found" if found else "none", found)
+
+
+    def _select(self, candidates: List) -> List:
+        """1등이 기준 점수를 넘지 못하면 관련 글 없음. 넘으면 기준을 넘은 글과, 1등과의 차이가 margin 이내인 글을 남긴다."""
+        if not candidates:
+            return []
+        top = max(m.score for m in candidates)
+        if top < self._min_score:
+            return []
+        keep = [m for m in candidates if m.score >= self._min_score or m.score >= top - self._margin]
+        return sorted(keep, key=lambda m: m.score, reverse=True)
 
 
 def get_searcher() -> PostSearcher:

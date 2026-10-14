@@ -14,7 +14,14 @@ from fastapi.testclient import TestClient
 from app.routers import posts_chat
 from app.services.embedder_client import EXPECTED_DIM, EmbedderUnavailable, EmbedResult
 from app.services.embedding_store import Match
-from app.services.post_search import DEFAULT_MIN_SCORE, MAX_CHARS_PER_POST, PostSearcher, get_min_score
+from app.services.post_search import (
+    DEFAULT_MIN_SCORE,
+    DEFAULT_SCORE_MARGIN,
+    MAX_CHARS_PER_POST,
+    PostSearcher,
+    get_min_score,
+    get_score_margin,
+)
 
 MODEL = "nlpai-lab/KURE-v1"
 QUESTION = "도커 볼륨은 뭐고 왜 쓰나요?"
@@ -144,7 +151,8 @@ class PostsChatApiTest(unittest.TestCase):
     def test_search_uses_ids_from_server_and_configured_limits(self):
         self.ask()
         self.assertEqual(self.embedder.calls, [[QUESTION]])
-        self.assertEqual(self.store.calls, [(["a", "b", "c"], 3, 0.5)])
+        # 기준(0.5)보다 margin(0.09)만큼 낮게 가져와서 파이썬에서 다시 거른다
+        self.assertEqual(self.store.calls, [(["a", "b", "c"], 3, 0.41)])
 
     def test_history_is_kept_and_only_last_question_gets_the_posts(self):
         history = [
@@ -158,6 +166,44 @@ class PostsChatApiTest(unittest.TestCase):
         self.assertEqual(messages[1]["content"], "안녕")
         self.assertIn("[글]", messages[3]["content"])
         self.assertEqual(self.embedder.calls, [[QUESTION]])  # 검색은 마지막 질문으로만
+
+    # ── 후속 질문 검색 ──────────────────────────────────────────────────────────
+    def follow_up(self, *questions):
+        """질문들을 사용자 메시지로 차례로 보내고(사이에 assistant 답 포함) 검색에 쓰인 문장을 돌려준다."""
+        history = []
+        for i, q in enumerate(questions):
+            if i:
+                history.append({"role": "assistant", "content": "답"})
+            history.append({"role": "user", "content": q})
+        self.ask(history)
+        return self.embedder.calls[0][0]
+
+    def test_short_follow_up_is_searched_together_with_the_previous_question(self):
+        self.assertEqual(self.follow_up("모니터링관련 글 있어?", "하나밖에 없는데?"), "모니터링관련 글 있어? 하나밖에 없는데?")
+
+    def test_answer_model_still_gets_only_the_last_question(self):
+        self.follow_up("모니터링관련 글 있어?", "하나밖에 없는데?")
+        self.assertTrue(self.llm.calls[0][-1]["content"].endswith("질문: 하나밖에 없는데?"))
+
+    def test_long_question_is_searched_alone(self):
+        self.assertEqual(self.follow_up("모니터링관련 글 있어?", QUESTION), QUESTION)
+
+    def test_chain_of_short_follow_ups_stops_at_the_first_long_question(self):
+        q = self.follow_up("안녕", "모니터링 글 정리한 게 있어?", "더 없어?", "하나뿐?")
+        self.assertEqual(q, "모니터링 글 정리한 게 있어? 더 없어? 하나뿐?")  # "안녕"까지는 거슬러 가지 않는다
+
+    def test_chain_is_limited_to_a_few_questions(self):
+        q = self.follow_up("가?", "나?", "다?", "라?", "마?")
+        self.assertEqual(q, "다? 라? 마?")
+
+    def test_first_question_has_nothing_to_join(self):
+        self.assertEqual(self.follow_up("도커?"), "도커?")
+
+    def test_search_query_is_capped(self):
+        long_question = "가" * 900
+        q = self.follow_up(long_question, "더?")
+        self.assertLessEqual(len(q), posts_chat.MAX_QUERY_CHARS)
+        self.assertTrue(q.endswith("더?"))
 
     def test_history_is_trimmed_to_recent_messages(self):
         history = []
@@ -185,6 +231,31 @@ class PostsChatApiTest(unittest.TestCase):
         self.assertIn("본문", user)
 
     # ── 관련 글이 없는 경우 ───────────────────────────────────────────────────
+    # ── 1등과 점수 차이가 작은 글도 함께 ─────────────────────────────────────────
+    def found_ids(self):
+        return [s["id"] for s in final_of(parse(self.ask()))["sources"]]
+
+    def test_post_below_min_score_is_kept_when_close_to_the_top(self):
+        self.store.matches = [Match("a", 0.551), Match("b", 0.474)]  # 실제 사례: 모니터링 1편 / 2편
+        self.assertEqual(self.found_ids(), ["a", "b"])
+
+    def test_post_far_below_the_top_is_dropped(self):
+        self.store.matches = [Match("a", 0.551), Match("b", 0.456)]  # 차이 0.095 — 관련 없는 글
+        self.assertEqual(self.found_ids(), ["a"])
+
+    def test_nothing_is_found_when_even_the_top_is_below_min_score(self):
+        self.store.matches = [Match("a", 0.49), Match("b", 0.48)]  # 1등이 기준 미달이면 가까워도 소용없다
+        final = final_of(parse(self.ask()))
+        self.assertEqual((final["search"], final["sources"]), ("none", []))
+
+    def test_posts_above_min_score_are_kept_even_if_far_from_the_top(self):
+        self.store.matches = [Match("a", 0.9), Match("b", 0.6)]  # 기준(0.5) 이상이면 기존처럼 남는다
+        self.assertEqual(self.found_ids(), ["a", "b"])
+
+    def test_results_are_ordered_by_score_even_if_store_returns_otherwise(self):
+        self.store.matches = [Match("b", 0.50), Match("a", 0.55)]
+        self.assertEqual(self.found_ids(), ["a", "b"])
+
     def test_no_match_says_so_then_answers_in_general_mode(self):
         self.store.matches = []
         events = parse(self.ask())
@@ -281,6 +352,21 @@ class PostsChatApiTest(unittest.TestCase):
             self.ask()
         self.assertNotIn("도커 볼륨", "\n".join(logs.output))
         self.assertIn("EmbedderUnavailable", "\n".join(logs.output))
+
+
+class ScoreMarginTest(unittest.TestCase):
+    def test_env_value_is_used_when_valid(self):
+        with mock.patch.dict(os.environ, {"POSTS_CHAT_SCORE_MARGIN": "0.05"}):
+            self.assertEqual(get_score_margin(), 0.05)
+        with mock.patch.dict(os.environ, {"POSTS_CHAT_SCORE_MARGIN": "0"}):
+            self.assertEqual(get_score_margin(), 0.0)
+
+    def test_default_when_missing_or_invalid(self):
+        for value in ("", "abc", "-0.1", "1.5"):
+            with mock.patch.dict(os.environ, {"POSTS_CHAT_SCORE_MARGIN": value}):
+                self.assertEqual(get_score_margin(), DEFAULT_SCORE_MARGIN, value)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_score_margin(), DEFAULT_SCORE_MARGIN)
 
 
 class MinScoreTest(unittest.TestCase):
