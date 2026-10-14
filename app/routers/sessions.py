@@ -21,7 +21,9 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
                     "select distinct s.id, s.post_id, s.post_title, s.post_category, "
                     "s.updated_at, "
                     "(select content from conversations c2 where c2.session_id = s.id "
-                    " order by c2.created_at desc limit 1) as last_message, s.kind "
+                    " order by c2.created_at desc limit 1) as last_message, s.kind, "
+                    "(select content from conversations c3 where c3.session_id = s.id and c3.role = 'user' "
+                    " order by c3.created_at asc limit 1) as first_question "
                     "from conversation_sessions s "
                     "left join conversations c on c.session_id = s.id "
                     "where s.user_id = %s "
@@ -33,7 +35,9 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
                 cur.execute(
                     "select s.id, s.post_id, s.post_title, s.post_category, s.updated_at, "
                     "(select content from conversations c where c.session_id = s.id "
-                    " order by c.created_at desc limit 1) as last_message, s.kind "
+                    " order by c.created_at desc limit 1) as last_message, s.kind, "
+                    "(select content from conversations c3 where c3.session_id = s.id and c3.role = 'user' "
+                    " order by c3.created_at asc limit 1) as first_question "
                     "from conversation_sessions s "
                     "where s.user_id = %s "
                     "order by s.updated_at desc",
@@ -50,6 +54,7 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
             "updated_at": r[4].isoformat(),
             "last_message": r[5],
             "kind": r[6],
+            "first_question": r[7],  # 세션의 첫 사용자 질문 — 목록 제목으로 쓴다(마지막 말은 긴 답변일 수 있다)
         }
         for r in rows
     ]

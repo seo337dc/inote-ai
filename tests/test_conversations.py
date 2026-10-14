@@ -135,10 +135,11 @@ class HistoryAndSessionsApiTest(unittest.TestCase):
     def test_session_list_includes_kind(self):
         now = datetime(2026, 10, 14, tzinfo=timezone.utc)
         for q in (None, "도커"):
-            cur = FakeCursor(rows=[("s1", None, None, None, now, "마지막 말", "posts")])
+            cur = FakeCursor(rows=[("s1", None, None, None, now, "마지막 말", "posts", "첫 질문")])
             with mock.patch.object(sessions, "get_connection", fake_connection(cur)):
                 res = self.client().get("/sessions", params={"user_id": "u1", **({"q": q} if q else {})})
             self.assertEqual(res.json()[0]["kind"], "posts", q)
+            self.assertEqual(res.json()[0]["first_question"], "첫 질문", q)
 
 
 if __name__ == "__main__":
