@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from app.logging_config import register_error_handlers, setup_logging
-from app.routers import book_info, chat, conversations, embeddings, reading_chat, sessions, summarize
+from app.routers import book_info, chat, conversations, embeddings, posts_chat, reading_chat, sessions, summarize
 
 setup_logging()
 
@@ -33,6 +33,7 @@ app.include_router(summarize.router)
 app.include_router(book_info.router)
 app.include_router(reading_chat.router)
 app.include_router(embeddings.router)
+app.include_router(posts_chat.router)
 
 
 @app.get("/health")
