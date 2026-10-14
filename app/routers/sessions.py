@@ -21,7 +21,7 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
                     "select distinct s.id, s.post_id, s.post_title, s.post_category, "
                     "s.updated_at, "
                     "(select content from conversations c2 where c2.session_id = s.id "
-                    " order by c2.created_at desc limit 1) as last_message "
+                    " order by c2.created_at desc limit 1) as last_message, s.kind "
                     "from conversation_sessions s "
                     "left join conversations c on c.session_id = s.id "
                     "where s.user_id = %s "
@@ -33,7 +33,7 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
                 cur.execute(
                     "select s.id, s.post_id, s.post_title, s.post_category, s.updated_at, "
                     "(select content from conversations c where c.session_id = s.id "
-                    " order by c.created_at desc limit 1) as last_message "
+                    " order by c.created_at desc limit 1) as last_message, s.kind "
                     "from conversation_sessions s "
                     "where s.user_id = %s "
                     "order by s.updated_at desc",
@@ -49,6 +49,7 @@ async def list_sessions(user_id: str, q: Optional[str] = None):
             "post_category": r[3],
             "updated_at": r[4].isoformat(),
             "last_message": r[5],
+            "kind": r[6],
         }
         for r in rows
     ]

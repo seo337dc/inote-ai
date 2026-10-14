@@ -2,7 +2,7 @@
 설계: inote 레포 docs/kure/PLAN.md 6절 D의 1차 범위(결정 17).
 
 엔드포인트
-  POST /posts-chat/stream   { messages: [{role, content}], user_id? }
+  POST /posts-chat/stream   { messages: [{role, content}], user_id?, session_id? }
   → SSE (기존 /chat/stream과 같은 형식)
      data: {"text": "..."}                         답변 조각 (여러 번)
      data: {"sources": [...], "mode": "...", ...}  마지막에 한 번 — 출처 글 목록과 답변 종류
@@ -12,11 +12,14 @@
 - 질문(마지막 user 메시지)으로 공개 글을 검색한다. 질문이 짧은 후속 질문이면 앞 질문을 붙여 검색한다(build_search_query). 기준 점수 이상인 글이 있으면 그 글만 근거로 답하고(mode="posts"),
   없거나 검색을 못 하면 "내 글에는 관련 내용이 없어요"를 먼저 알린 뒤 일반 답변을 한다(mode="general", 웹 조회는 2차).
 - 링크는 모델이 쓰지 않는다. sources의 글 id로 FE가 주소를 만들고, 답변의 [1][2]는 sources 순서를 가리킨다.
-- 1차 제약: 대화 기록을 저장하지 않는다(요청에 담긴 대화로만 답한다). user_id는 쓰지 않는다(공개 글만 다루므로).
+- 대화 저장: user_id와 session_id가 둘 다 있을 때만(로그인 사용자) 기존 채팅과 같은 테이블에 kind="posts"로 저장한다 —
+  질문, 그리고 답변과 출처 글(이력에서 카드를 복원하려고). 없으면 저장하지 않는 휘발성 채팅이다(게스트).
+  저장 실패가 답변을 막지 않는다. 검색 대상은 user_id와 무관하게 공개 글뿐이다.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from groq import Groq
 from pydantic import BaseModel, Field, model_validator
 
+from app.routers.conversations import save_message, upsert_session
 from app.services.post_search import FoundPost, PostSearcher, get_searcher
 
 logger = logging.getLogger(__name__)
@@ -66,7 +70,8 @@ class PostsChatMessage(BaseModel):
 
 
 class PostsChatRequest(BaseModel):
-    user_id: Optional[str] = None  # 1차는 쓰지 않는다 (기존 채팅 요청과 모양을 맞추려고 받기만 함)
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None  # user_id와 함께 있을 때만 대화를 저장한다
     messages: List[PostsChatMessage] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -122,6 +127,11 @@ async def posts_chat_stream(
     history = [{"role": m.role, "content": m.content} for m in data.messages][-MAX_HISTORY:]
     question = next(m["content"] for m in reversed(history) if m["role"] == "user")
 
+    persist = bool(data.user_id and data.session_id)
+    if persist:
+        await asyncio.to_thread(upsert_session, data.session_id, data.user_id, kind="posts")
+        await asyncio.to_thread(save_message, data.session_id, "user", question)
+
     outcome = await searcher.search(build_search_query(history))
 
     if outcome.status == "found":
@@ -141,12 +151,17 @@ async def posts_chat_stream(
 
     def generate():
         try:
+            full_text = ""
             if notice:
+                full_text += notice
                 yield _sse({"text": notice})
             for text in llm.stream(messages):
+                full_text += text
                 yield _sse({"text": text})
             yield _sse({"sources": sources, "mode": mode, "search": outcome.status})
             yield "data: [DONE]\n\n"
+            if persist:
+                save_message(data.session_id, "assistant", full_text, sources)
         except Exception:
             # 스트리밍 도중의 실패는 이미 응답이 시작돼 전역 에러 핸들러로 못 가므로 여기서 남긴다(질문 내용은 남기지 않는다)
             logger.exception("posts chat stream failed (search=%s)", outcome.status)

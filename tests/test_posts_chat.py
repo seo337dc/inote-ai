@@ -115,6 +115,15 @@ class PostsChatApiTest(unittest.TestCase):
         )
         app.dependency_overrides[posts_chat.get_llm] = lambda: self.llm
         self.client = TestClient(app)
+        # DB에 쓰지 않는다 — 어떤 값으로 저장하려 했는지만 본다
+        self.saved: List[tuple] = []
+        patches = [
+            mock.patch.object(posts_chat, "upsert_session", side_effect=lambda *a, **k: self.saved.append(("session", a, k))),
+            mock.patch.object(posts_chat, "save_message", side_effect=lambda *a, **k: self.saved.append(("message", a, k))),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def ask(self, messages=None, **extra):
         body = {"messages": messages or [{"role": "user", "content": QUESTION}], **extra}
@@ -331,6 +340,49 @@ class PostsChatApiTest(unittest.TestCase):
                 self.assertEqual(self.client.post("/posts-chat/stream", json=body).status_code, 422)
         self.assertEqual(self.llm.calls, [])
         self.assertEqual(self.embedder.calls, [])
+
+    # ── 대화 저장 (로그인 사용자) ───────────────────────────────────────────────
+    def test_conversation_is_saved_as_posts_kind_with_sources(self):
+        self.ask(user_id="u1", session_id="s1")
+        self.assertEqual(
+            self.saved,
+            [
+                ("session", ("s1", "u1"), {"kind": "posts"}),
+                ("message", ("s1", "user", QUESTION), {}),
+                (
+                    "message",
+                    ("s1", "assistant", "도커 볼륨은 데이터를 보존합니다[1].", [
+                        {"id": "a", "title": "Docker - Volume", "category": "DevOps", "score": 0.62},
+                        {"id": "b", "title": "Docker", "category": "DevOps", "score": 0.55},
+                    ]),
+                    {},
+                ),
+            ],
+        )
+
+    def test_saved_answer_includes_the_no_match_notice_and_empty_sources(self):
+        self.store.matches = []
+        self.ask(user_id="u1", session_id="s1")
+        kind, args, _ = self.saved[-1]
+        self.assertEqual((kind, args[1]), ("message", "assistant"))
+        self.assertTrue(args[2].startswith(posts_chat.NOTICE_NONE))  # 화면에 보인 그대로 저장
+        self.assertEqual(args[3], [])
+
+    def test_nothing_is_saved_without_both_user_id_and_session_id(self):
+        self.ask()  # 게스트
+        self.ask(user_id="u1")
+        self.ask(session_id="s1")
+        self.assertEqual(self.saved, [])
+
+    def test_only_the_last_question_is_saved_each_time(self):
+        history = [
+            {"role": "user", "content": "첫 질문"},
+            {"role": "assistant", "content": "첫 답"},
+            {"role": "user", "content": QUESTION},
+        ]
+        self.ask(history, user_id="u1", session_id="s1")
+        user_saves = [a for k, a, _ in self.saved if k == "message" and a[1] == "user"]
+        self.assertEqual(user_saves, [("s1", "user", QUESTION)])
 
     def test_user_id_is_optional_and_ignored(self):
         self.assertEqual(self.ask(user_id="someone").status_code, 200)

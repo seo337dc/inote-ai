@@ -30,7 +30,7 @@ inote (FE, Next.js)
 | Method | URL | 설명 |
 |--------|-----|------|
 | POST | `/chat/stream` | LLM 채팅 (SSE 스트리밍), 세션 upsert + 메시지 저장 |
-| POST | `/posts-chat/stream` | **글 목록 화면 채팅(글 찾기)** — 공개 글을 먼저 검색하고 찾은 글을 근거로 답변 (SSE, 대화 기록 저장 없음) |
+| POST | `/posts-chat/stream` | **글 목록 화면 채팅(글 찾기)** — 공개 글을 먼저 검색하고 찾은 글을 근거로 답변 (SSE, 요청에 `user_id`+`session_id`가 있으면 `kind="posts"`로 저장) |
 | GET | `/conversations/{session_id}` | 세션의 대화 이력 조회 (`user_id` 필수) |
 | GET | `/sessions` | 세션 목록 (`user_id` 필수, `q`로 검색) |
 | POST | `/summarize` | 글 내용 → 불릿 요약 (내부 전용, `x-internal-secret`) |
@@ -101,7 +101,7 @@ POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit
 설계: `inote` 레포 `docs/kure/PLAN.md` 6절 D의 1차 범위(결정 17). 글 목록(posts) 화면의 채팅은 **검색을 먼저** 한다.
 
 ```
-POST /posts-chat/stream   { "messages": [{"role": "user", "content": "도커 볼륨은 뭐고 왜 쓰나요?"}] }
+POST /posts-chat/stream   { "messages": [{"role": "user", "content": "도커 볼륨은 뭐고 왜 쓰나요?"}], "user_id"?: "...", "session_id"?: "..." }
   → SSE   data: {"text": "..."}                                      (답변 조각, 여러 번)
           data: {"sources": [{id,title,category,score}], "mode": "posts"|"general", "search": "found"|"none"|"unavailable"}
           data: [DONE]

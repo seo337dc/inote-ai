@@ -288,3 +288,14 @@ curl로 다양한 케이스(가격 질문 10회 반복, 검색, 추천, 도구 �
 - **수정**: 읽는 부분을 `app/cors_origins.py`의 `parse_allowed_origins`로 분리했다. 항목마다 앞뒤 공백·값 전체를 감싼 따옴표·끝의 `/`를 정리하고 빈 항목·중복을 버린다. 환경변수가 없으면 로컬 기본값만, **있는데 쓸 항목이 없으면 빈 목록(아무 출처도 허용하지 않음)** — 설정 실수를 열어 두지 않는다.
 - **테스트 18개**(`tests/test_cors_origins.py`): 파싱 규칙, 실제 CORS 미들웨어의 사전 요청 응답(허용 출처 200·`allow-origin` 헤더, 목록 밖 출처 400), 예전 방식이 로컬 출처를 거절하는 **회귀 재현**, `app.main`이 이 함수를 쓰는지(앱을 다시 읽어 확인). 구현을 일부러 망가뜨린 변이 11개를 모두 잡았고, 공백 제거를 빼 이번 버그를 되살리면 10개가 실패한다.
 - **배포 후**: 이 코드가 배포되면 Vercel 값에 공백이 있어도 동작한다(값을 고칠 필요 없음). 단 코드 배포가 끝나야 반영된다.
+
+## 2026-10-14 — 글 찾기 대화 저장 + 세션 종류(kind)
+
+`/`(글 목록) 채팅이 대화 저장 없이 만들어져 히스토리 버튼이 사라진 문제를 바로잡는 첫 단계(AI 서버·DB). 모든 화면의 채팅을 한 히스토리에 모으고 뱃지로 구분하는 방향.
+
+- **DB(추가만 하는 변경)**: `conversation_sessions.kind text not null default 'write'`(write·posts·reading·todo), `conversations.sources jsonb`(출처 글 카드 복원용). 기존 세션은 모두 `write`.
+- **`/posts-chat/stream`**: 요청에 `user_id`+`session_id`가 둘 다 있을 때만(로그인 사용자) 질문·답변(안내 문구 포함)·출처를 저장. 게스트는 저장 없음. 저장 실패는 답변을 막지 않는다.
+- **`GET /sessions`** 가 `kind`를, **`GET /conversations/{id}`** 가 출처가 있는 답변에 `sources`를 돌려준다.
+- **배포 순서 주의**: `/sessions`가 `s.kind`를 읽으므로 **DB 마이그레이션(schema.sql의 ALTER 두 줄)을 먼저 운영 DB에 적용한 뒤** 코드를 배포한다. 반대로 하면 목록 조회가 실패한다. (ALTER는 `if not exists`라 여러 번 실행해도 안전하다.)
+- 테스트: `tests/test_posts_chat.py`(저장 4건), `tests/test_conversations.py`(SQL 파라미터·이력·목록, 신규). 로컬 개발 DB로 실제 저장→이력→목록→kind 유지까지 확인.
+- 남은 것: 독서 채팅 저장(kind=reading), FE(세션 로직 공용화·뱃지·글 찾기 훅 연결).

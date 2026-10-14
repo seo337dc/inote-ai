@@ -20,6 +20,12 @@ create table if not exists conversations (
 
 create index if not exists conversations_session_id_idx on conversations (session_id);
 
+-- 세션 종류(화면별 채팅 구분용 뱃지) — 기존 세션은 모두 'write'. 값은 코드(app/routers/conversations.py SESSION_KINDS)에서 검증한다.
+--   write 글쓰기·일반 채팅 / posts 글 목록의 글 찾기 / reading 독서 / todo 할 일
+alter table conversation_sessions add column if not exists kind text not null default 'write';
+-- 글 찾기 답변의 출처 글 카드를 이력에서 복원하려고 답변과 함께 저장한다([{id,title,category,score}]). 없으면 null.
+alter table conversations add column if not exists sources jsonb;
+
 comment on table conversation_sessions is
   '대화 세션 하나. post_id가 있으면 글쓰기 세션(그 글에 묶임), null이면 일반 대화 세션.';
 comment on column conversation_sessions.id is
