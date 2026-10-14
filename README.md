@@ -30,6 +30,7 @@ inote (FE, Next.js)
 | Method | URL | 설명 |
 |--------|-----|------|
 | POST | `/chat/stream` | LLM 채팅 (SSE 스트리밍), 세션 upsert + 메시지 저장 |
+| POST | `/posts-chat/stream` | **글 목록 화면 채팅(글 찾기)** — 공개 글을 먼저 검색하고 찾은 글을 근거로 답변 (SSE, 대화 기록 저장 없음) |
 | GET | `/conversations/{session_id}` | 세션의 대화 이력 조회 (`user_id` 필수) |
 | GET | `/sessions` | 세션 목록 (`user_id` 필수, `q`로 검색) |
 | POST | `/summarize` | 글 내용 → 불릿 요약 (내부 전용, `x-internal-secret`) |
@@ -95,6 +96,23 @@ POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit
 - 모든 요청에 `x-internal-secret` 필요. 서버에 `INTERNAL_SECRET`이 없으면 전부 503으로 거절한다.
 - 한도: 제목 500자, 본문 200만자, 후보 id 5000개, `limit` 1~50, `minScore` 0~1.
 
+### 글 목록 채팅 `글 찾기` (`/posts-chat/stream`)
+
+설계: `inote` 레포 `docs/kure/PLAN.md` 6절 D의 1차 범위(결정 17). 글 목록(posts) 화면의 채팅은 **검색을 먼저** 한다.
+
+```
+POST /posts-chat/stream   { "messages": [{"role": "user", "content": "도커 볼륨은 뭐고 왜 쓰나요?"}] }
+  → SSE   data: {"text": "..."}                                      (답변 조각, 여러 번)
+          data: {"sources": [{id,title,category,score}], "mode": "posts"|"general", "search": "found"|"none"|"unavailable"}
+          data: [DONE]
+```
+
+- 흐름: 질문을 KURE로 벡터로 바꿔 **공개 글**에서 검색 → 기준 점수 이상이면 그 글만 근거로 Groq가 추천·설명(`mode: posts`) → 없거나 검색을 못 하면 "내 글에는 관련 내용이 없어요"를 먼저 알리고 일반 답변(`mode: general`, 웹 조회는 2차).
+- **공개 글만**: 후보 글 id는 `inote-server`의 `GET /blog/posts/public-ids`(내부 비밀키)에서 받고, 글 내용도 BE의 공개 조회 API로 가져온다(비공개·임시저장이면 404 → 건너뜀). 이 서비스는 공개 여부를 판단하지 않는다.
+- **링크는 모델이 쓰지 않는다**: `sources`의 글 id로 FE가 주소를 만들고, 답변의 `[1][2]`는 `sources` 순서를 가리킨다.
+- 요청에 `system` 역할 메시지는 받지 않는다(프롬프트 끼워 넣기 방지). 질문 1000자, 대화는 최근 10개만 쓴다. 로그에는 질문 내용을 남기지 않는다.
+- 1차 제약: 대화 기록을 저장하지 않고(`user_id`는 받기만 함), KURE를 질문마다 부르므로 **운영에서 열려면 KURE 호스팅이 선행**된다.
+
 ### 테스트
 
 ```bash
@@ -115,6 +133,7 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 | `ALLOWED_ORIGINS` | CORS 허용 origin, 콤마로 여러 개 구분 (FE 도메인) |
 | `EMBEDDER_URL` | 임베딩 서비스(`inote-embedder`) 주소. 없으면 임베딩 API는 503 (글 저장은 영향 없음) |
 | `EMBEDDER_SECRET` | 임베딩 서비스가 기대하는 비밀키 — `INTERNAL_SECRET`과는 **다른 값** |
+| `POSTS_CHAT_MIN_SCORE` | 글 목록 채팅의 검색 기준 점수(0~1, 기본 0.5 — A7 평가로 확정할 임시값). 이보다 낮은 글은 근거로 쓰지 않음 |
 | `EMBEDDER_MODEL` | 기대하는 모델 이름(기본 `nlpai-lab/KURE-v1`) — 저장된 벡터와 다르면 다시 계산 |
 
 ## DB 스키마
