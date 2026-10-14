@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
+from app.cors_origins import parse_allowed_origins
 from app.logging_config import register_error_handlers, setup_logging
 from app.routers import book_info, chat, conversations, embeddings, posts_chat, reading_chat, sessions, summarize
 
@@ -17,7 +18,8 @@ setup_logging()
 app = FastAPI(title="inote-ai")
 register_error_handlers(app)
 
-allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3011").split(",")
+# 쉼표 뒤 공백·따옴표 같은 입력 실수를 정리해서 읽는다 (app/cors_origins.py)
+allowed_origins = parse_allowed_origins(os.environ.get("ALLOWED_ORIGINS"))
 
 app.add_middleware(
     CORSMiddleware,
