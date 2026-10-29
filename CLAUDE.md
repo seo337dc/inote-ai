@@ -30,7 +30,7 @@ inote-ai → inote-server의 blog API 호출 (RAG 인덱싱 시 글 내용 조�
 
 ## 현재 상태 (2026-10-12 갱신)
 
-> **KURE 임베딩 작업**(글 벡터 저장·유사 글 조회 API, `/embeddings/*`)은 아래 2026-09-11 기준 내용보다 새로운 것이다 — `inote` 레포 `docs/kure/HANDOFF.md`(브랜치 `docs/kure-handoff`, `main` 병합 전)와 `DEV_LOG.md`(A4·A5), `README.md`를 먼저 읽는다.
+> **KURE 임베딩 작업**(글 벡터 저장·유사 글 조회 API, `/embeddings/*`)은 아래 2026-09-11 기준 내용보다 새로운 것이다 — `inote` 레포 `docs/kure/HANDOFF.md`(브랜치 `docs/kure-handoff`, `main` 병합 전)와 `docs/devlog/ai.md`(A4·A5), `README.md`를 먼저 읽는다.
 > 구현됨: `PUT`·`DELETE /embeddings/posts/{id}`, `POST /embeddings/similar`(BE가 넘긴 후보 id 안에서만), 로컬 개발 DB(`docker-compose.dev.yml`, 5434), 테스트 59개. 운영 AI DB 적용·임베딩 서비스 호스팅은 아직.
 > **로컬에서 서버를 띄울 때 `.env`의 `DATABASE_URL`은 운영 값이다 — 항상 개발 DB 주소로 덮어쓴다**(README "이 DB로 서버 띄우기").
 

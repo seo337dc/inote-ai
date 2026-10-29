@@ -6,7 +6,7 @@ __pycache__/
 .env.*
 !.env.example
 *.log
-DEV_LOG.md
+docs/
 README.md
 CLAUDE.md
 render.yaml

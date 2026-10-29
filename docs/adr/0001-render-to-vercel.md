@@ -1,7 +1,7 @@
 # inote-ai 호스팅 이전 — Render → Vercel
 
-> 이 레포(`inote-ai`)의 이전 기록. 전체 배경·원인·결정은 `inote` 레포의 `docs/infra/hosting-migration.md`,
-> DB 이전(Neon → Supabase)은 `inote-server` 레포의 `docs/supabase-migration.md` 참고. Notion 정리용 원본.
+> 이 레포(`inote-ai`)의 이전 기록. 전체 배경·원인·결정은 `inote` 레포의 `docs/adr/0003-hosting-migration.md`,
+> DB 이전(Neon → Supabase)은 `inote-server` 레포의 `docs/adr/0001-neon-to-supabase.md` 참고. Notion 정리용 원본.
 > 시작: 2026-09-30 / 상태: 🟡 구성 완료, Vercel 배포 대기
 
 ---
