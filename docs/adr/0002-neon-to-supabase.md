@@ -1,7 +1,7 @@
 # inote-ai DB 이전 — Neon → Supabase (AI 전용 프로젝트로 분리)
 
 > AI 서버 쪽 작업만 정리. 전체 계획·Supabase 연결 방식·위험 요소는 `inote-server` 레포의
-> `docs/supabase-migration.md` 참고. Notion 정리용 원본.
+> `docs/adr/0001-neon-to-supabase.md` 참고. Notion 정리용 원본.
 > 작성: 2026-09-30 / 최종 갱신: 2026-10-02 / 상태: 🟡 데이터 이전·로컬 검증 완료, Vercel 환경변수 교체 전
 
 ---
@@ -54,7 +54,7 @@
 - [ ] 일시중지 방지: cron-job으로 AI `/health/db`(내부 시크릿 헤더 필요)를 주기적으로 호출 — 쿼리를 보내므로 DB 활동으로 잡힘
 - [ ] BE 프로젝트에 남아 있는 `ai` 스키마(합치기 시도 때 복원한 사본) 삭제 — 안정화 후
 - [ ] Neon AI DB는 안정화 후 정리(삭제), Render에 옛 AI 서비스가 있으면 일시중지·삭제
-- [ ] `README.md`·`CLAUDE.md`·`docs/vercel-migration.md`의 DB 정보 최신화
+- [ ] `README.md`·`CLAUDE.md`·`docs/adr/0001-render-to-vercel.md`의 DB 정보 최신화
 - [ ] 접속 파일(`inote-server/.env.supabase-ai.local`)의 비밀번호 로테이션 고려
 
 ## 4. 진행 로그
