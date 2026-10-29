@@ -4,15 +4,15 @@
 담당하며 로그인 로직은 없음 — FE가 이미 인증된 `user_id`를 실어 보내면 그대로 신뢰해서 데이터에
 태깅만 한다.
 
-왜 별도 서비스로 분리했는지, 전체 아키텍처는 `inote` 레포의 `PLANNING.md`/`STRATEGY.md` 참고.
+왜 별도 서비스로 분리했는지, 전체 아키텍처는 `inote` 레포의 `PLANNING.md` 참고.
 전체 개발 이력은 [`docs/devlog/ai.md`](./docs/devlog/ai.md), 남은 로드맵은 [`CLAUDE.md`](./CLAUDE.md) 참고.
 
 ## 아키텍처
 
 ```
 inote (FE, Next.js)
-  ├─ inote-server (BE, NestJS)         — 글 CRUD, 인증, 자체 Neon DB
-  └─ inote-ai (이 레포, FastAPI/Python)  — LLM 채팅, 대화 저장, AI 요약, 별도 Neon DB
+  ├─ inote-server (BE, NestJS)         — 글 CRUD, 인증, 자체 Supabase DB
+  └─ inote-ai (이 레포, FastAPI/Python)  — LLM 채팅, 대화 저장, AI 요약, 별도 Supabase 프로젝트(DB)
 ```
 
 `inote-ai` ↔ `inote-server`는 고정 시크릿 헤더(`x-internal-secret`)로 서로 내부 API를 호출한다
@@ -40,12 +40,12 @@ inote (FE, Next.js)
 | GET | `/health` | 헬스 체크 |
 
 FastAPI가 기본 제공하는 Swagger UI를 그대로 씀 — 로컬 `http://localhost:8000/docs`, 배포
-`https://inote-ai.onrender.com/docs` (OpenAPI 스키마는 `/openapi.json`).
+`https://inote-ai-cyan.vercel.app/docs` (OpenAPI 스키마는 `/openapi.json`).
 
 ## 스택
 
 - Python + FastAPI + uvicorn
-- PostgreSQL (Neon, `inote-server`와는 별도 DB) — `psycopg`
+- PostgreSQL (Supabase, `inote-server`와는 별도 프로젝트) — `psycopg`
 - Groq API (LLM 채팅·요약)
 - httpx (내부 서비스 간 호출)
 
@@ -127,7 +127,8 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 | 변수 | 설명 |
 |------|------|
 | `GROQ_API_KEY` | Groq API 키 |
-| `DATABASE_URL` | 이 레포 전용 Neon PostgreSQL 연결 문자열 |
+| `DATABASE_URL` | 이 레포 전용 Supabase 프로젝트의 PostgreSQL 연결 문자열 (Transaction pooler 6543) |
+| `KAKAO_REST_API_KEY` | 독서 기록의 책 검색(카카오 도서 API)용 |
 | `INTERNAL_SECRET` | `inote-server`와 동일한 값이어야 함 (서비스 간 인증) |
 | `INOTE_SERVER_URL` | `inote-server`의 `/api/v1` 베이스 URL (글 작성자 확인용) |
 | `ALLOWED_ORIGINS` | CORS 허용 origin, 콤마로 여러 개 구분 (FE 도메인). 쉼표 뒤 공백·값을 감싼 따옴표·끝의 `/`는 자동으로 정리하고 중복·빈 항목은 버린다(`app/cors_origins.py`). 없으면 `http://localhost:3011`만, 있는데 쓸 항목이 없으면 아무 origin도 허용하지 않음 |
@@ -145,22 +146,14 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 
 ## 배포
 
-Render 무료 티어, `render.yaml` 블루프린트 사용. Render 대시보드에서 "New +" → "Blueprint"로
-이 레포를 연결하면 `render.yaml`대로 서비스가 만들어지고, 위 환경변수 5개만 대시보드에서
-직접 입력하면 된다 (전부 `sync: false`라 레포에는 값이 없음).
+**Vercel** (Python 함수, Framework는 FastAPI로 자동 인식). 진입점은 `app/main.py`의 `app`이라 `vercel.json`은 없고, Python 버전은 `.python-version`(3.12)으로 고정한다. 환경변수(위 표)는 Vercel 대시보드에 직접 입력하고 레포에는 값이 없다.
 
-배포 URL: https://inote-ai.onrender.com
+배포 URL: https://inote-ai-cyan.vercel.app (헬스 체크 `/health`, 진단용 `/health/db`는 내부 시크릿 헤더 필요)
 
-**콜드 스타트 방지 (TODO)** — `inote-server`는 [cron-job.org](https://cron-job.org)에서
-10분마다 헬스체크를 호출해 Render 무료 플랜의 슬립(15분 무활동)을 막고 있다. `inote-ai`도
-같은 방식으로 cron-job.org에 아래 값으로 등록해야 한다 (cron-job.org 계정 접근이 필요해
-사람이 직접 등록):
-
-| 항목 | 값 |
-|------|-----|
-| URL | `https://inote-ai.onrender.com/health` |
-| Method | GET |
-| 주기 | 10분마다 |
+- `.vercelignore`가 `venv/`, `.env`, `docs/`, 테스트 등을 번들에서 뺀다(Python 함수는 프로젝트 파일을 전부 번들에 넣는다).
+- Render에서 2026-09-30에 이전했다 — 경위와 한도·트러블슈팅은 [`docs/adr/0001-render-to-vercel.md`](./docs/adr/0001-render-to-vercel.md). 서버리스라 상시 프로세스·WebSocket·백그라운드 작업이 없고, 별도의 콜드 스타트 방지 핑도 필요 없다.
+- `render.yaml`·`runtime.txt`는 Render 시절 파일이 남은 것이다.
+- DB: [`docs/adr/0002-neon-to-supabase.md`](./docs/adr/0002-neon-to-supabase.md)
 
 ## 관련 문서
 

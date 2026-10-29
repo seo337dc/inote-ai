@@ -20,22 +20,13 @@
 
 ## 아키텍처
 
-```
-inote-blog (FE)
-  → inote-ai (이 레포, Python/FastAPI) → Groq (LLM), 자체 DB(PostgreSQL + pgvector)
-  → inote-server의 blog 모듈 (글 CRUD, 인증)
-
-inote-ai → inote-server의 blog API 호출 (RAG 인덱싱 시 글 내용 조회용, DB 직접 조인 안 함)
-```
+구성도와 서비스 간 통신(`x-internal-secret`)은 [`README.md`](./README.md)의 "아키텍처"가 기준이다. RAG 인덱싱 때 글 내용은 `inote-server`의 blog API로 가져온다(DB 직접 조인 안 함).
 
 ## 현재 상태 (2026-10-12 갱신)
 
-> **KURE 임베딩 작업**(글 벡터 저장·유사 글 조회 API, `/embeddings/*`)은 아래 2026-09-11 기준 내용보다 새로운 것이다 — `inote` 레포 `docs/kure/HANDOFF.md`(브랜치 `docs/kure-handoff`, `main` 병합 전)와 `docs/devlog/ai.md`(A4·A5), `README.md`를 먼저 읽는다.
+> **KURE 임베딩 작업**(글 벡터 저장·유사 글 조회 API, `/embeddings/*`)은 아래 2026-09-11 기준 내용보다 새로운 것이다 — `inote` 레포 `docs/kure/HANDOFF.md`와 `docs/devlog/ai.md`(A4·A5), `README.md`를 먼저 읽는다.
 > 구현됨: `PUT`·`DELETE /embeddings/posts/{id}`, `POST /embeddings/similar`(BE가 넘긴 후보 id 안에서만), 로컬 개발 DB(`docker-compose.dev.yml`, 5434), 테스트 59개. 운영 AI DB 적용·임베딩 서비스 호스팅은 아직.
 > **로컬에서 서버를 띄울 때 `.env`의 `DATABASE_URL`은 운영 값이다 — 항상 개발 DB 주소로 덮어쓴다**(README "이 DB로 서버 띄우기").
-
-레포만 생성, 코드 없음. devlog-llm(`apps/api`)의 구조·패턴을 최대한 재사용해서 세팅할 예정.
-블로그 관련 LLM 기능만 먼저 범위를 잡아 설계를 확정함 (아래 참고) — 구현은 아직 시작 전.
 
 ## 블로그 LLM 기능 — 범위·설계 결정 (2026-09-11)
 
@@ -68,11 +59,11 @@ inote-ai → inote-server의 blog API 호출 (RAG 인덱싱 시 글 내용 조�
 
 ## 로컬 개발
 
-아직 세팅 전.
+[`README.md`](./README.md)의 "로컬 실행"·"로컬 개발 DB"를 본다.
 
 ## 배포
 
-아직 배포 전. devlog-llm과 동일하게 Render 무료 티어 예정.
+Vercel (`https://inote-ai-cyan.vercel.app`). Render 무료 한도 초과로 2026-09-30 이전했다 — [`docs/adr/0001-render-to-vercel.md`](./docs/adr/0001-render-to-vercel.md). DB는 Supabase 별도 프로젝트([`0002`](./docs/adr/0002-neon-to-supabase.md)). `render.yaml`·`runtime.txt`는 Render 시절 파일이 남은 것이다.
 
 ## Git / GitHub 계정
 
@@ -153,7 +144,6 @@ inote-ai → inote-server의 blog API 호출 (RAG 인덱싱 시 글 내용 조�
 쌓이지만 않으면 됨.
 
 아래는 위 단계들 안에서 자연스럽게 같이 결정되는 것들 — 별도 단계로 안 뺌:
-- 별도 Neon DB 프로비저닝 (3번 단계에서, 대화 기록 저장할 때)
 - Groq API 키 발급/재사용 여부 (1번 단계에서)
 - `inote-server`의 blog API 호출 방식 (4번 단계의 요약 흐름에서 필요해지면)
 - `user_id`/이메일 태깅 방식 (1번 단계 `/chat` 요청부터 적용)
