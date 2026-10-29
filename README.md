@@ -5,7 +5,7 @@
 태깅만 한다.
 
 왜 별도 서비스로 분리했는지, 전체 아키텍처는 `inote` 레포의 `PLANNING.md`/`STRATEGY.md` 참고.
-전체 개발 이력은 [`DEV_LOG.md`](./DEV_LOG.md), 남은 로드맵은 [`CLAUDE.md`](./CLAUDE.md) 참고.
+전체 개발 이력은 [`docs/devlog/ai.md`](./docs/devlog/ai.md), 남은 로드맵은 [`CLAUDE.md`](./CLAUDE.md) 참고.
 
 ## 아키텍처
 
@@ -165,4 +165,4 @@ Render 무료 티어, `render.yaml` 블루프린트 사용. Render 대시보드�
 ## 관련 문서
 
 - [CLAUDE.md](./CLAUDE.md) — 로드맵/현재 체크리스트
-- [DEV_LOG.md](./DEV_LOG.md) — 세션별 상세 개발 기록
+- [docs/devlog/ai.md](./docs/devlog/ai.md) — 세션별 상세 개발 기록
