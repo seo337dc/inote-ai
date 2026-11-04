@@ -96,6 +96,24 @@ POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit
 - 모든 요청에 `x-internal-secret` 필요. 서버에 `INTERNAL_SECRET`이 없으면 전부 503으로 거절한다.
 - 한도: 제목 500자, 본문 200만자, 후보 id 5000개, `limit` 1~50, `minScore` 0~1.
 
+#### 임베딩 작업 대기열과 워커 (`embedding_job`)
+
+임베딩 서비스에 닿지 못할 때(운영 Vercel은 내 PC의 임베딩 서비스에 닿지 못한다) `PUT /embeddings/posts/{id}`는 **글을 대기열에 남기고 202 `{"status": "queued"}`**로 답한다
+(대기열에도 남기지 못하면 503). 글 하나에 작업 하나라 같은 글을 다시 저장하면 그 작업만 갱신된다. 임베딩에 성공하면 그 글의 대기 작업은 지운다.
+⚠️ 대기 작업에는 **글 본문(비공개 글 포함)이 잠시 저장된다** — 처리가 끝나면 비우고, 글이 삭제되면(`DELETE`) 함께 지운다.
+
+대기 작업은 임베딩 서비스가 있는 곳에서 워커를 돌려 처리한다. 레포 루트에서 (`.env`를 읽지 않으니 값을 직접 준다):
+```bash
+# 개발 DB + 로컬 임베딩 서비스: 대기 작업을 모두 처리하고 끝낸다
+DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_dev" \
+EMBEDDER_URL="http://127.0.0.1:8100" EMBEDDER_SECRET="<임베딩 서비스의 INTERNAL_SECRET>" \
+venv/bin/python -m scripts.embedding_worker            # 옵션: --loop --interval 30 / --status / --retry-failed / --max-attempts N
+```
+- **개발 DB(로컬 호스트 + DB 이름이 `_dev`로 끝남)가 아니면 `--allow-remote` 없이는 실행하지 않는다.** 첫 줄에 `대상: DB … → 임베딩 서비스 …`가 출력된다(비밀번호 없음).
+- 서비스에 **닿지 못하면** 시도 횟수를 세지 않고 멈춘다(작업은 대기 상태 유지). **응답은 왔지만 실패하면** 횟수를 세고, 상한(기본 5)에 닿으면 `failed` — 한 작업이 큐를 막지 않는다. 원인을 고친 뒤 `--retry-failed`.
+- 워커가 둘이어도 같은 작업을 동시에 가져가지 않고(`FOR UPDATE SKIP LOCKED`), 처리 중에 글이 다시 저장되면 오래된 내용의 벡터는 쓰지 않는다.
+- 설계 메모와 상태 흐름은 `app/services/embedding_jobs.py`·`embedding_worker.py`의 docstring.
+
 ### 글 목록 채팅 `글 찾기` (`/posts-chat/stream`)
 
 설계: `inote` 레포 `docs/kure/PLAN.md` 6절 D의 1차 범위(결정 17). 글 목록(posts) 화면의 채팅은 **검색을 먼저** 한다.
@@ -132,8 +150,9 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 | `INTERNAL_SECRET` | `inote-server`와 동일한 값이어야 함 (서비스 간 인증) |
 | `INOTE_SERVER_URL` | `inote-server`의 `/api/v1` 베이스 URL (글 작성자 확인용) |
 | `ALLOWED_ORIGINS` | CORS 허용 origin, 콤마로 여러 개 구분 (FE 도메인). 쉼표 뒤 공백·값을 감싼 따옴표·끝의 `/`는 자동으로 정리하고 중복·빈 항목은 버린다(`app/cors_origins.py`). 없으면 `http://localhost:3011`만, 있는데 쓸 항목이 없으면 아무 origin도 허용하지 않음 |
-| `EMBEDDER_URL` | 임베딩 서비스(`inote-embedder`) 주소. 없으면 임베딩 API는 503 (글 저장은 영향 없음) |
+| `EMBEDDER_URL` | 임베딩 서비스(`inote-embedder`) 주소. 없거나 닿지 못하면 글 저장(`PUT`)은 대기열에 남기고 202, 유사 글 조회는 503 (글 저장은 영향 없음) |
 | `EMBEDDER_TIMEOUT` / `EMBEDDER_RETRIES` | (선택) 임베딩 서비스 요청 제한 시간(초, 0 초과 300 이하, 기본 40) / 실패 시 재시도 횟수(0~5, 기본 0) |
+| `EMBEDDING_JOB_MAX_ATTEMPTS` / `EMBEDDING_JOB_STALE_SECONDS` | (선택, 워커용) 작업 하나의 최대 시도 횟수(1~20, 기본 5) / 처리 중인 채 이만큼 갱신이 없으면 워커가 멈춘 것으로 보고 다시 가져감(10~86400초, 기본 600) |
 | `EMBEDDER_SECRET` | 임베딩 서비스가 기대하는 비밀키 — `INTERNAL_SECRET`과는 **다른 값** |
 | `POSTS_CHAT_MIN_SCORE` | 글 목록 채팅의 검색 기준 점수(0~1, 기본 0.5 — A7 평가로 확정할 임시값). 1등이 이보다 낮으면 "관련 글 없음" |
 | `POSTS_CHAT_SCORE_MARGIN` | 기준에 못 미쳐도 1등 점수와 이 값 이내면 함께 보여줌(0~1, 기본 0.09, 0이면 끔 — 임시값). 같은 주제 글의 점수 차이를 보완 |

@@ -26,6 +26,20 @@ def vector_literal(vector: Sequence[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in vector) + "]"
 
 
+def upsert_with_cursor(cur, post_id: str, model: str, digest: str, vector: Sequence[float]) -> None:
+    """이미 열려 있는 트랜잭션(cursor) 안에서 벡터를 저장한다 — 대기열 워커가 '작업 완료 처리'와 한 트랜잭션으로 묶으려고 쓴다."""
+    cur.execute(
+        """
+        insert into post_embedding (post_id, model, content_hash, embedding)
+        values (%s, %s, %s, %s::extensions.vector)
+        on conflict (post_id) do update set
+          model = excluded.model, content_hash = excluded.content_hash,
+          embedding = excluded.embedding, embedded_at = now()
+        """,
+        (post_id, model, digest, vector_literal(vector)),
+    )
+
+
 class EmbeddingStore:
     def get_state(self, post_id: str) -> Optional[Tuple[str, str]]:
         """저장된 (모델, 내용 해시). 벡터가 없으면 None."""
@@ -36,16 +50,7 @@ class EmbeddingStore:
 
     def upsert(self, post_id: str, model: str, digest: str, vector: Sequence[float]) -> None:
         with get_connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                insert into post_embedding (post_id, model, content_hash, embedding)
-                values (%s, %s, %s, %s::extensions.vector)
-                on conflict (post_id) do update set
-                  model = excluded.model, content_hash = excluded.content_hash,
-                  embedding = excluded.embedding, embedded_at = now()
-                """,
-                (post_id, model, digest, vector_literal(vector)),
-            )
+            upsert_with_cursor(cur, post_id, model, digest, vector)
 
     def delete(self, post_id: str) -> bool:
         """지웠으면 True, 원래 없었으면 False (어느 쪽이든 오류가 아니다)."""

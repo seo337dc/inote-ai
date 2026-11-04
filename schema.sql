@@ -69,3 +69,34 @@ comment on column post_embedding.content_hash is '임베딩한 텍스트(제목+
 comment on column post_embedding.embedding is '정규화된 1024차원 벡터. 거리는 코사인(<=>)';
 
 alter table post_embedding enable row level security;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 임베딩 작업 대기열 — 임베딩 서비스에 닿지 못한 저장 요청을 남겨 두고, 워커가 나중에 한 건씩 처리한다.
+-- 글 하나당 행 하나(post_id가 키): 같은 글을 다시 저장하면 새 행이 아니라 이 행을 갱신해서 중복 임베딩을 막는다.
+-- ⚠️ 위 post_embedding과 달리 **글 본문(HTML)을 잠시 저장한다**(비공개 글 포함). 처리가 끝나면 content를 비운다.
+--    글이 삭제되면 대기 작업도 함께 지워야 한다(코드에서 처리).
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists embedding_job (
+  post_id    text primary key,
+  title      text not null,
+  content    text,
+  status     text not null default 'pending' check (status in ('pending', 'processing', 'done', 'failed')),
+  attempts   integer not null default 0,
+  last_error text,
+  version    integer not null default 1,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- 워커가 "처리할 작업"을 오래된 순으로 가져온다
+create index if not exists embedding_job_status_idx on embedding_job (status, updated_at);
+
+comment on table embedding_job is '글 임베딩 작업 대기열. 글 하나에 행 하나, 처리가 끝나면 본문(content)은 비운다.';
+comment on column embedding_job.post_id is 'inote-server Post.id — post_embedding과 같은 값(다른 DB라 외래 키는 없다)';
+comment on column embedding_job.content is '임베딩할 글 본문(HTML). done이 되면 null로 비운다 — 비공개 글이 오래 남지 않게';
+comment on column embedding_job.status is 'pending 대기 / processing 처리 중(워커가 가져감) / done 완료 / failed 재시도 횟수 초과';
+comment on column embedding_job.attempts is '처리를 시도한 횟수. 정해진 횟수를 넘으면 failed';
+comment on column embedding_job.version is '같은 글이 다시 저장될 때마다 +1. 처리 중에 내용이 바뀌었는지 확인해서, 오래된 내용으로 done 처리하지 않는다';
+comment on column embedding_job.updated_at is '처리 중(processing) 상태가 너무 오래 지속된 작업(워커 비정상 종료)을 다시 가져가는 기준';
+
+alter table embedding_job enable row level security;

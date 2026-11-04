@@ -10,7 +10,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routers import embeddings
-from app.services.embedder_client import EXPECTED_DIM, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
+from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
+from app.services.embedding_jobs import get_job_store
 from app.services.embedding_store import Match, get_store
 from app.services.text_prep import build_embedding_text, content_hash, html_to_text
 
@@ -61,16 +62,38 @@ class FakeStore:
         return self.vector_matches
 
 
+class FakeJobStore:
+    """작업 대기열 호출 기록용. fail_*로 DB 오류를 흉내 낸다."""
+
+    def __init__(self):
+        self.jobs = {}  # post_id -> {"title", "content", "version"}
+        self.fail_enqueue = False
+        self.fail_delete = False
+
+    def enqueue(self, post_id, title, content):
+        if self.fail_enqueue:
+            raise RuntimeError("db down")
+        version = self.jobs.get(post_id, {}).get("version", 0) + 1
+        self.jobs[post_id] = {"title": title, "content": content, "version": version}
+        return version
+
+    def delete(self, post_id):
+        if self.fail_delete:
+            raise RuntimeError("db down")
+        return self.jobs.pop(post_id, None) is not None
+
+
 class ApiTestCase(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.dict(os.environ, {"INTERNAL_SECRET": SECRET})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.store, self.embedder = FakeStore(), FakeEmbedder()
+        self.store, self.embedder, self.jobs = FakeStore(), FakeEmbedder(), FakeJobStore()
         app = FastAPI()
         app.include_router(embeddings.router)
         app.dependency_overrides[get_store] = lambda: self.store
         app.dependency_overrides[get_embedder] = lambda: self.embedder
+        app.dependency_overrides[get_job_store] = lambda: self.jobs
         self.client = TestClient(app)
 
 
@@ -156,13 +179,86 @@ class UpsertTest(ApiTestCase):
                 self.assertEqual(self.put(title=title, content=content).status_code, 422)
         self.assertEqual(self.embedder.calls, [])
 
-    def test_임베딩_서비스를_쓸_수_없으면_503이고_저장하지_않는다(self):
+    # --- 임베딩 서비스를 쓸 수 없을 때: 대기열 ---
+    def test_임베딩_서비스를_쓸_수_없으면_벡터는_저장하지_않고_대기열에_남기고_202(self):
         self.embedder.down = True
+
+        res = self.put(title="제목", content="<p>본문</p>")
+
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.json()["status"], "queued")
+        self.assertEqual(self.store.rows, {})
+        self.assertEqual(self.jobs.jobs, {"p1": {"title": "제목", "content": "<p>본문</p>", "version": 1}})  # 원문 HTML 그대로
+
+    def test_임베딩_서비스_주소가_없어도_글_저장은_성공하고_작업이_남는다(self):
+        # 운영(Vercel)은 임베딩 서비스에 닿지 못한다는 전제 — EMBEDDER_URL이 비어 있는 실제 클라이언트로 확인한다
+        self.client.app.dependency_overrides[get_embedder] = lambda: EmbedderClient(base_url="", secret="")
+
+        res = self.put()
+
+        self.assertEqual((res.status_code, res.json()["status"]), (202, "queued"))
+        self.assertIn("p1", self.jobs.jobs)
+
+    def test_같은_글을_다시_저장하면_대기_작업을_갱신하고_하나만_남는다(self):
+        self.embedder.down = True
+        self.put(content="<p>하나</p>")
+
+        self.put(content="<p>둘</p>")
+
+        self.assertEqual(list(self.jobs.jobs), ["p1"])
+        self.assertEqual((self.jobs.jobs["p1"]["content"], self.jobs.jobs["p1"]["version"]), ("<p>둘</p>", 2))
+
+    def test_대기열에도_남기지_못하면_503이다(self):
+        self.embedder.down = True
+        self.jobs.fail_enqueue = True
 
         res = self.put()
 
         self.assertEqual(res.status_code, 503)
         self.assertEqual(self.store.rows, {})
+
+    def test_임베딩에_성공하면_그_글의_대기_작업을_지운다(self):
+        self.jobs.jobs["p1"] = {"title": "옛 제목", "content": "<p>옛 내용</p>", "version": 3}
+        self.jobs.jobs["p2"] = {"title": "다른 글", "content": "<p>x</p>", "version": 1}
+
+        res = self.put()
+
+        self.assertEqual(res.json()["status"], "embedded")
+        self.assertEqual(list(self.jobs.jobs), ["p2"])  # 다른 글의 작업은 그대로
+
+    def test_벡터를_쓰기_전에_대기_작업을_먼저_지운다(self):
+        # 워커가 같은 글을 처리 중이면 그 완료를 기다렸다가 지운 뒤 최신 벡터를 써야, 워커의 오래된 벡터가 최신 벡터를 덮어쓰지 못한다
+        log = []
+        original_delete, original_upsert = self.jobs.delete, self.store.upsert
+        self.jobs.delete = lambda post_id: (log.append("job.delete"), original_delete(post_id))[1]
+        self.store.upsert = lambda *args: (log.append("store.upsert"), original_upsert(*args))[1]
+
+        self.put()
+
+        self.assertEqual(log, ["job.delete", "store.upsert"])
+
+    def test_내용이_같아_건너뛸_때도_그_글의_대기_작업을_지운다(self):
+        self.put()
+        self.jobs.jobs["p1"] = {"title": "t", "content": "<p>c</p>", "version": 2}
+
+        res = self.put()
+
+        self.assertEqual(res.json()["status"], "unchanged")
+        self.assertEqual(self.jobs.jobs, {})
+
+    def test_대기_작업_정리가_실패해도_저장_응답은_성공이다(self):
+        self.jobs.fail_delete = True
+
+        res = self.put()
+
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "embedded"))
+        self.assertIn("p1", self.store.rows)
+
+    def test_내용이_비어_있으면_대기열에도_남기지_않는다(self):
+        self.embedder.down = True
+
+        self.assertEqual(self.put(title="", content="").status_code, 422)
+        self.assertEqual(self.jobs.jobs, {})
 
     def test_입력_크기_상한(self):
         self.assertEqual(self.put(title="가" * (embeddings.MAX_TITLE_CHARS + 1)).status_code, 422)
@@ -180,9 +276,25 @@ class DeleteTest(ApiTestCase):
         first = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
         second = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
 
-        self.assertEqual((first.status_code, first.json()), (200, {"deleted": True}))
-        self.assertEqual((second.status_code, second.json()), (200, {"deleted": False}))
+        self.assertEqual((first.status_code, first.json()), (200, {"deleted": True, "jobDeleted": False}))
+        self.assertEqual((second.status_code, second.json()), (200, {"deleted": False, "jobDeleted": False}))
         self.assertEqual(self.store.rows, {})
+
+    def test_글을_삭제하면_대기_작업도_지운다(self):
+        # 대기 작업에는 글 본문이 들어 있다 — 삭제한 글의 내용이 남으면 안 된다
+        self.jobs.jobs["p1"] = {"title": "t", "content": "<p>비공개 내용</p>", "version": 1}
+        self.jobs.jobs["p2"] = {"title": "다른 글", "content": "<p>x</p>", "version": 1}
+
+        res = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
+
+        self.assertEqual(res.json(), {"deleted": False, "jobDeleted": True})
+        self.assertEqual(list(self.jobs.jobs), ["p2"])
+
+    def test_대기_작업을_지우지_못하면_숨기지_않고_오류로_알린다(self):
+        self.jobs.fail_delete = True
+
+        with self.assertRaises(RuntimeError):  # 실제 서버에서는 500이 된다
+            self.client.delete("/embeddings/posts/p1", headers=HEADERS)
 
 
 class SimilarTest(ApiTestCase):
