@@ -10,7 +10,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routers import embeddings
-from app.services.embedder_client import EXPECTED_DIM, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
+from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
+from app.services.embedding_jobs import get_job_store
 from app.services.embedding_store import Match, get_store
 from app.services.text_prep import build_embedding_text, content_hash, html_to_text
 
@@ -36,7 +37,9 @@ class FakeStore:
 
     def __init__(self):
         self.rows = {}
+        self.chunks = {}  # post_id -> (model, source_hash, [ChunkRow, ...])
         self.upserts = []
+        self.writes = []
         self.similar_calls = []
         self.post_matches: Optional[List[Match]] = []
         self.vector_matches: List[Match] = []
@@ -45,12 +48,28 @@ class FakeStore:
         row = self.rows.get(post_id)
         return (row[0], row[1]) if row else None
 
+    def get_chunk_state(self, post_id):
+        row = self.chunks.get(post_id)
+        return (row[0], row[1], len(row[2])) if row else None
+
     def upsert(self, post_id, model, digest, vector):
         self.rows[post_id] = (model, digest, list(vector))
         self.upserts.append(post_id)
 
+    def write(self, post_id, model, post, chunks, source_hash):
+        self.writes.append(post_id)
+        if post is not None:
+            self.upsert(post_id, model, post[0], post[1])
+        if chunks is not None:
+            if chunks:
+                self.chunks[post_id] = (model, source_hash, list(chunks))
+            else:
+                self.chunks.pop(post_id, None)
+
     def delete(self, post_id):
-        return self.rows.pop(post_id, None) is not None
+        deleted_post = self.rows.pop(post_id, None) is not None
+        deleted_chunks = self.chunks.pop(post_id, None) is not None
+        return deleted_post or deleted_chunks
 
     def similar_to_post(self, post_id, candidate_ids, limit, min_score):
         self.similar_calls.append(("post", post_id, list(candidate_ids), limit, min_score))
@@ -61,16 +80,38 @@ class FakeStore:
         return self.vector_matches
 
 
+class FakeJobStore:
+    """작업 대기열 호출 기록용. fail_*로 DB 오류를 흉내 낸다."""
+
+    def __init__(self):
+        self.jobs = {}  # post_id -> {"title", "content", "version"}
+        self.fail_enqueue = False
+        self.fail_delete = False
+
+    def enqueue(self, post_id, title, content):
+        if self.fail_enqueue:
+            raise RuntimeError("db down")
+        version = self.jobs.get(post_id, {}).get("version", 0) + 1
+        self.jobs[post_id] = {"title": title, "content": content, "version": version}
+        return version
+
+    def delete(self, post_id):
+        if self.fail_delete:
+            raise RuntimeError("db down")
+        return self.jobs.pop(post_id, None) is not None
+
+
 class ApiTestCase(unittest.TestCase):
     def setUp(self):
         patcher = mock.patch.dict(os.environ, {"INTERNAL_SECRET": SECRET})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.store, self.embedder = FakeStore(), FakeEmbedder()
+        self.store, self.embedder, self.jobs = FakeStore(), FakeEmbedder(), FakeJobStore()
         app = FastAPI()
         app.include_router(embeddings.router)
         app.dependency_overrides[get_store] = lambda: self.store
         app.dependency_overrides[get_embedder] = lambda: self.embedder
+        app.dependency_overrides[get_job_store] = lambda: self.jobs
         self.client = TestClient(app)
 
 
@@ -107,9 +148,10 @@ class UpsertTest(ApiTestCase):
         res = self.put(title="도커", content="<h1>시작</h1><p>컨테이너</p>")
 
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), {"status": "embedded", "model": MODEL, "dim": EXPECTED_DIM})
+        self.assertEqual(res.json(), {"status": "embedded", "model": MODEL, "dim": EXPECTED_DIM, "chunks": 1})
         expected_text = build_embedding_text("도커", html_to_text("<h1>시작</h1><p>컨테이너</p>"))
-        self.assertEqual(self.embedder.calls, [[expected_text]])  # HTML 태그는 지워서 보낸다
+        # 글 벡터용 텍스트 1개 + 조각 1개(짧은 글은 조각이 하나뿐이고, 제목+조각이 글 텍스트와 같다)를 한 번에 보낸다. HTML 태그는 지운다
+        self.assertEqual(self.embedder.calls, [[expected_text, expected_text]])
         model, digest, _ = self.store.rows["p1"]
         self.assertEqual((model, digest), (MODEL, content_hash(expected_text)))
 
@@ -156,13 +198,86 @@ class UpsertTest(ApiTestCase):
                 self.assertEqual(self.put(title=title, content=content).status_code, 422)
         self.assertEqual(self.embedder.calls, [])
 
-    def test_임베딩_서비스를_쓸_수_없으면_503이고_저장하지_않는다(self):
+    # --- 임베딩 서비스를 쓸 수 없을 때: 대기열 ---
+    def test_임베딩_서비스를_쓸_수_없으면_벡터는_저장하지_않고_대기열에_남기고_202(self):
         self.embedder.down = True
+
+        res = self.put(title="제목", content="<p>본문</p>")
+
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual(res.json()["status"], "queued")
+        self.assertEqual(self.store.rows, {})
+        self.assertEqual(self.jobs.jobs, {"p1": {"title": "제목", "content": "<p>본문</p>", "version": 1}})  # 원문 HTML 그대로
+
+    def test_임베딩_서비스_주소가_없어도_글_저장은_성공하고_작업이_남는다(self):
+        # 운영(Vercel)은 임베딩 서비스에 닿지 못한다는 전제 — EMBEDDER_URL이 비어 있는 실제 클라이언트로 확인한다
+        self.client.app.dependency_overrides[get_embedder] = lambda: EmbedderClient(base_url="", secret="")
+
+        res = self.put()
+
+        self.assertEqual((res.status_code, res.json()["status"]), (202, "queued"))
+        self.assertIn("p1", self.jobs.jobs)
+
+    def test_같은_글을_다시_저장하면_대기_작업을_갱신하고_하나만_남는다(self):
+        self.embedder.down = True
+        self.put(content="<p>하나</p>")
+
+        self.put(content="<p>둘</p>")
+
+        self.assertEqual(list(self.jobs.jobs), ["p1"])
+        self.assertEqual((self.jobs.jobs["p1"]["content"], self.jobs.jobs["p1"]["version"]), ("<p>둘</p>", 2))
+
+    def test_대기열에도_남기지_못하면_503이다(self):
+        self.embedder.down = True
+        self.jobs.fail_enqueue = True
 
         res = self.put()
 
         self.assertEqual(res.status_code, 503)
         self.assertEqual(self.store.rows, {})
+
+    def test_임베딩에_성공하면_그_글의_대기_작업을_지운다(self):
+        self.jobs.jobs["p1"] = {"title": "옛 제목", "content": "<p>옛 내용</p>", "version": 3}
+        self.jobs.jobs["p2"] = {"title": "다른 글", "content": "<p>x</p>", "version": 1}
+
+        res = self.put()
+
+        self.assertEqual(res.json()["status"], "embedded")
+        self.assertEqual(list(self.jobs.jobs), ["p2"])  # 다른 글의 작업은 그대로
+
+    def test_벡터를_쓰기_전에_대기_작업을_먼저_지운다(self):
+        # 워커가 같은 글을 처리 중이면 그 완료를 기다렸다가 지운 뒤 최신 벡터를 써야, 워커의 오래된 벡터가 최신 벡터를 덮어쓰지 못한다
+        log = []
+        original_delete, original_upsert = self.jobs.delete, self.store.upsert
+        self.jobs.delete = lambda post_id: (log.append("job.delete"), original_delete(post_id))[1]
+        self.store.upsert = lambda *args: (log.append("store.upsert"), original_upsert(*args))[1]
+
+        self.put()
+
+        self.assertEqual(log, ["job.delete", "store.upsert"])
+
+    def test_내용이_같아_건너뛸_때도_그_글의_대기_작업을_지운다(self):
+        self.put()
+        self.jobs.jobs["p1"] = {"title": "t", "content": "<p>c</p>", "version": 2}
+
+        res = self.put()
+
+        self.assertEqual(res.json()["status"], "unchanged")
+        self.assertEqual(self.jobs.jobs, {})
+
+    def test_대기_작업_정리가_실패해도_저장_응답은_성공이다(self):
+        self.jobs.fail_delete = True
+
+        res = self.put()
+
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "embedded"))
+        self.assertIn("p1", self.store.rows)
+
+    def test_내용이_비어_있으면_대기열에도_남기지_않는다(self):
+        self.embedder.down = True
+
+        self.assertEqual(self.put(title="", content="").status_code, 422)
+        self.assertEqual(self.jobs.jobs, {})
 
     def test_입력_크기_상한(self):
         self.assertEqual(self.put(title="가" * (embeddings.MAX_TITLE_CHARS + 1)).status_code, 422)
@@ -173,6 +288,103 @@ class UpsertTest(ApiTestCase):
         self.assertEqual(self.client.put("/embeddings/posts/p1", json={}, headers=HEADERS).status_code, 422)
 
 
+class ChunkUpsertTest(ApiTestCase):
+    """글 벡터와 함께 조각(청크) 벡터를 저장하는 동작."""
+
+    def put(self, post_id="p1", title="제목", content="<p>본문</p>"):
+        return self.client.put(f"/embeddings/posts/{post_id}", json={"title": title, "content": content}, headers=HEADERS)
+
+    @staticmethod
+    def long_html(paragraphs=30, word="가나다라"):
+        return "".join(f"<p>문단{n} " + word * 60 + "</p>" for n in range(paragraphs))
+
+    def test_긴_글은_여러_조각으로_나뉘어_글_벡터와_함께_한_번에_저장된다(self):
+        res = self.put(content=self.long_html())
+
+        self.assertEqual(res.status_code, 200)
+        count = res.json()["chunks"]
+        self.assertGreater(count, 3)
+        self.assertEqual(self.store.writes, ["p1"])  # 글 벡터와 조각이 한 번의 쓰기(= 한 트랜잭션)로 들어간다
+        model, _, rows = self.store.chunks["p1"]
+        self.assertEqual((model, len(rows)), (MODEL, count))
+        self.assertEqual([r.idx for r in rows], list(range(count)))  # 글 순서대로 0부터
+
+    def test_조각의_위치는_원문_텍스트를_그대로_가리키고_본문은_저장하지_않는다(self):
+        html = self.long_html()
+        self.put(title="도커", content=html)
+
+        plain = html_to_text(html)
+        for r in self.store.chunks["p1"][2]:
+            self.assertTrue(plain[r.start : r.end].startswith(("문단", "가나다라")))
+            self.assertFalse(hasattr(r, "text"))
+
+    def test_임베딩_입력이_많으면_16개씩_나눠_보낸다(self):
+        res = self.put(content=self.long_html(paragraphs=120))
+
+        self.assertGreater(res.json()["chunks"] + 1, 16)
+        self.assertTrue(all(len(c) <= 16 for c in self.embedder.calls))
+        self.assertEqual(sum(len(c) for c in self.embedder.calls), res.json()["chunks"] + 1)  # 글 벡터 1 + 조각들
+
+    def test_같은_글을_다시_저장하면_조각도_다시_만들지_않는다(self):
+        self.put(content=self.long_html())
+        res = self.put(content=self.long_html())
+
+        self.assertEqual(res.json()["status"], "unchanged")
+        self.assertEqual(self.store.writes, ["p1"])  # 두 번째 저장은 쓰기도 하지 않았다
+        self.assertEqual(len(self.embedder.calls), 1)  # 임베딩 서비스도 한 번만 불렀다
+
+    def test_글이_바뀌면_조각이_통째로_바뀐다(self):
+        self.put(content=self.long_html(paragraphs=30))
+        before = self.store.chunks["p1"][2]
+        self.put(content=self.long_html(paragraphs=10, word="마바사"))
+        after = self.store.chunks["p1"][2]
+
+        self.assertLess(len(after), len(before))
+        self.assertEqual([r.idx for r in after], list(range(len(after))))
+
+    def test_조각_기능_이전에_저장된_글은_조각만_새로_만든다(self):
+        html = self.long_html(paragraphs=6)
+        self.store.rows["p1"] = (expected_model(), content_hash(build_embedding_text("제목", html_to_text(html))), [0.0])
+
+        res = self.put(content=html)
+
+        self.assertEqual(res.json()["status"], "embedded")
+        self.assertEqual(self.store.upserts, [])  # 글 벡터는 이미 최신이라 다시 쓰지 않는다
+        self.assertEqual(sum(len(c) for c in self.embedder.calls), res.json()["chunks"])  # 글 벡터용 입력은 없다
+        self.assertEqual(len(self.store.chunks["p1"][2]), res.json()["chunks"])
+
+    def test_도중에_임베딩이_실패하면_아무것도_저장하지_않고_대기열에_남긴다(self):
+        original = self.embedder.embed
+        state = {"n": 0}
+
+        def flaky(texts):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise EmbedderUnavailable("두 번째 묶음에서 실패")
+            return original(texts)
+
+        self.embedder.embed = flaky
+        res = self.put(content=self.long_html(paragraphs=120))  # 16개씩 여러 번 나눠 보낸다
+
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual((self.store.writes, self.store.rows, self.store.chunks), ([], {}, {}))  # 일부만 저장된 상태가 없다
+        self.assertIn("p1", self.jobs.jobs)
+
+    def test_본문이_비어_제목만_있는_글은_글_벡터만_있고_조각은_없다(self):
+        res = self.put(title="제목만", content="")
+
+        self.assertEqual(res.json()["chunks"], 0)
+        self.assertIn("p1", self.store.rows)
+        self.assertNotIn("p1", self.store.chunks)
+
+    def test_삭제하면_조각도_함께_지운다(self):
+        self.put(content=self.long_html())
+        res = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
+
+        self.assertTrue(res.json()["deleted"])
+        self.assertNotIn("p1", self.store.chunks)
+
+
 class DeleteTest(ApiTestCase):
     def test_있으면_지우고_없어도_오류가_아니다(self):
         self.store.rows["p1"] = (MODEL, "h", [0.0])
@@ -180,9 +392,25 @@ class DeleteTest(ApiTestCase):
         first = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
         second = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
 
-        self.assertEqual((first.status_code, first.json()), (200, {"deleted": True}))
-        self.assertEqual((second.status_code, second.json()), (200, {"deleted": False}))
+        self.assertEqual((first.status_code, first.json()), (200, {"deleted": True, "jobDeleted": False}))
+        self.assertEqual((second.status_code, second.json()), (200, {"deleted": False, "jobDeleted": False}))
         self.assertEqual(self.store.rows, {})
+
+    def test_글을_삭제하면_대기_작업도_지운다(self):
+        # 대기 작업에는 글 본문이 들어 있다 — 삭제한 글의 내용이 남으면 안 된다
+        self.jobs.jobs["p1"] = {"title": "t", "content": "<p>비공개 내용</p>", "version": 1}
+        self.jobs.jobs["p2"] = {"title": "다른 글", "content": "<p>x</p>", "version": 1}
+
+        res = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
+
+        self.assertEqual(res.json(), {"deleted": False, "jobDeleted": True})
+        self.assertEqual(list(self.jobs.jobs), ["p2"])
+
+    def test_대기_작업을_지우지_못하면_숨기지_않고_오류로_알린다(self):
+        self.jobs.fail_delete = True
+
+        with self.assertRaises(RuntimeError):  # 실제 서버에서는 500이 된다
+            self.client.delete("/embeddings/posts/p1", headers=HEADERS)
 
 
 class SimilarTest(ApiTestCase):

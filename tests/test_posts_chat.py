@@ -62,9 +62,22 @@ class FakeEmbedder:
 class FakeStore:
     def __init__(self):
         self.matches: List[Match] = []
+        self.chunk_matches: list = []
+        self.layout: dict = {}
         self.calls: List[tuple] = []
+        self.chunk_calls: List[tuple] = []
+        self.layout_down = False
 
-    def similar_to_vector(self, vector, candidate_ids, limit, min_score):
+    def similar_chunks_to_vector(self, vector, candidate_ids, limit, min_score):
+        self.chunk_calls.append((list(candidate_ids), limit, min_score))
+        return list(self.chunk_matches)
+
+    def chunk_layout(self, post_ids):
+        if self.layout_down:
+            raise RuntimeError("db down")
+        return {pid: self.layout[pid] for pid in post_ids if pid in self.layout}
+
+    def similar_to_vector(self, vector, candidate_ids, limit, min_score, without_chunks_only=False):
         self.calls.append((list(candidate_ids), limit, min_score))
         return list(self.matches)
 
@@ -111,7 +124,7 @@ class PostsChatApiTest(unittest.TestCase):
         app = FastAPI()
         app.include_router(posts_chat.router)
         app.dependency_overrides[posts_chat.get_searcher] = lambda: PostSearcher(
-            self.server, self.embedder, self.store, min_score=0.5, limit=3
+            self.server, self.embedder, self.store, min_score=0.5, limit=3, score_margin=0.09  # 기본값이 바뀌어도 이 테스트들은 동작 방식만 본다
         )
         app.dependency_overrides[posts_chat.get_llm] = lambda: self.llm
         self.client = TestClient(app)

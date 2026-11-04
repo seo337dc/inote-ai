@@ -69,3 +69,66 @@ comment on column post_embedding.content_hash is '임베딩한 텍스트(제목+
 comment on column post_embedding.embedding is '정규화된 1024차원 벡터. 거리는 코사인(<=>)';
 
 alter table post_embedding enable row level security;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 글 조각(청크) 임베딩 — 긴 글을 300~500토큰쯤으로 나눠 조각마다 벡터를 만든다(RAG 검색 단위). 설계: PLAN.md 6절 D.
+-- ⚠️ 조각 **본문은 저장하지 않는다**: 글 본문을 순수 텍스트로 바꾼 뒤의 위치(start_offset~end_offset)와 해시만 둔다.
+--    보여 줄 때는 BE에서 글을 가져와 같은 방식으로 텍스트로 바꾸고 그 위치를 잘라 낸다 → 삭제한 글의 내용이 이 DB에 남지 않는다.
+-- 글 하나를 다시 저장하면 그 글의 조각을 모두 지우고 새로 넣는다(코드에서 한 트랜잭션으로).
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists post_chunk_embedding (
+  post_id      text        not null,
+  idx          integer     not null check (idx >= 0),
+  start_offset integer     not null check (start_offset >= 0),
+  end_offset   integer     not null,
+  content_hash text        not null,
+  source_hash  text        not null,
+  model        text        not null,
+  embedding    extensions.vector(1024) not null,
+  embedded_at  timestamptz not null default now(),
+  primary key (post_id, idx),
+  check (end_offset > start_offset)
+);
+-- 글이 수십~수백 개(조각 수백~수천 개)라 인덱스 없이 전체 비교(정확)로 충분하다. 조각이 수만 개를 넘기면 HNSW 인덱스를 검토.
+
+comment on table post_chunk_embedding is '글 조각 하나의 임베딩 벡터. 조각 본문은 저장하지 않고 위치와 해시만 둔다.';
+comment on column post_chunk_embedding.post_id is 'inote-server Post.id — 다른 DB라 외래 키는 없다(글 삭제 때 코드에서 함께 지운다)';
+comment on column post_chunk_embedding.idx is '글 안에서의 조각 번호(0부터, 글 순서대로) — 앞뒤 조각을 함께 가져올 때 쓴다';
+comment on column post_chunk_embedding.start_offset is '글 본문을 순수 텍스트로 바꾼 결과(html_to_text)에서 조각이 시작하는 위치(글자 수, 포함)';
+comment on column post_chunk_embedding.end_offset is '조각이 끝나는 위치(제외)';
+comment on column post_chunk_embedding.content_hash is '임베딩한 텍스트(제목+조각)의 해시';
+comment on column post_chunk_embedding.source_hash is '글 전체(제목+본문 텍스트+조각 나누기 설정)의 해시 — 같은 글의 조각은 모두 같은 값. 같으면 다시 나누지 않는다';
+comment on column post_chunk_embedding.embedding is '정규화된 1024차원 벡터. 거리는 코사인(<=>)';
+
+alter table post_chunk_embedding enable row level security;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 임베딩 작업 대기열 — 임베딩 서비스에 닿지 못한 저장 요청을 남겨 두고, 워커가 나중에 한 건씩 처리한다.
+-- 글 하나당 행 하나(post_id가 키): 같은 글을 다시 저장하면 새 행이 아니라 이 행을 갱신해서 중복 임베딩을 막는다.
+-- ⚠️ 위 post_embedding과 달리 **글 본문(HTML)을 잠시 저장한다**(비공개 글 포함). 처리가 끝나면 content를 비운다.
+--    글이 삭제되면 대기 작업도 함께 지워야 한다(코드에서 처리).
+-- ─────────────────────────────────────────────────────────────────────────────
+create table if not exists embedding_job (
+  post_id    text primary key,
+  title      text not null,
+  content    text,
+  status     text not null default 'pending' check (status in ('pending', 'processing', 'done', 'failed')),
+  attempts   integer not null default 0,
+  last_error text,
+  version    integer not null default 1,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- 워커가 "처리할 작업"을 오래된 순으로 가져온다
+create index if not exists embedding_job_status_idx on embedding_job (status, updated_at);
+
+comment on table embedding_job is '글 임베딩 작업 대기열. 글 하나에 행 하나, 처리가 끝나면 본문(content)은 비운다.';
+comment on column embedding_job.post_id is 'inote-server Post.id — post_embedding과 같은 값(다른 DB라 외래 키는 없다)';
+comment on column embedding_job.content is '임베딩할 글 본문(HTML). done이 되면 null로 비운다 — 비공개 글이 오래 남지 않게';
+comment on column embedding_job.status is 'pending 대기 / processing 처리 중(워커가 가져감) / done 완료 / failed 재시도 횟수 초과';
+comment on column embedding_job.attempts is '처리를 시도한 횟수. 정해진 횟수를 넘으면 failed';
+comment on column embedding_job.version is '같은 글이 다시 저장될 때마다 +1. 처리 중에 내용이 바뀌었는지 확인해서, 오래된 내용으로 done 처리하지 않는다';
+comment on column embedding_job.updated_at is '처리 중(processing) 상태가 너무 오래 지속된 작업(워커 비정상 종료)을 다시 가져가는 기준';
+
+alter table embedding_job enable row level security;

@@ -87,7 +87,7 @@ DB를 처음부터 다시 만들려면 `down -v`. 로컬 DB는 Supabase처럼 `e
 
 ```
 PUT  /embeddings/posts/{id}   { "title": "...", "content": "<p>HTML 본문</p>" }
-  → { "status": "embedded" | "unchanged", "model": "nlpai-lab/KURE-v1", "dim": 1024 }
+  → { "status": "embedded" | "unchanged", "model": "nlpai-lab/KURE-v1", "dim": 1024, "chunks": 3 }
 POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit": 5, "minScore": 0.6 }
                            또는 { "title": "...", "content": "...", "candidateIds": [...] }   (저장 전 글)
   → { "items": [{ "postId": "...", "score": 0.78 }], "sourceEmbedded": true }
@@ -95,6 +95,46 @@ POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit
 - 임베딩 서비스(`EMBEDDER_URL`)가 없거나 응답이 없으면 임베딩이 필요한 요청은 **503** — 호출한 쪽이 기능만 숨기면 된다. 후보가 비어 있으면 임베딩 서비스를 부르지 않고 빈 결과.
 - 모든 요청에 `x-internal-secret` 필요. 서버에 `INTERNAL_SECRET`이 없으면 전부 503으로 거절한다.
 - 한도: 제목 500자, 본문 200만자, 후보 id 5000개, `limit` 1~50, `minScore` 0~1.
+
+#### 임베딩 작업 대기열과 워커 (`embedding_job`)
+
+임베딩 서비스에 닿지 못할 때(운영 Vercel은 내 PC의 임베딩 서비스에 닿지 못한다) `PUT /embeddings/posts/{id}`는 **글을 대기열에 남기고 202 `{"status": "queued"}`**로 답한다
+(대기열에도 남기지 못하면 503). 글 하나에 작업 하나라 같은 글을 다시 저장하면 그 작업만 갱신된다. 임베딩에 성공하면 그 글의 대기 작업은 지운다.
+⚠️ 대기 작업에는 **글 본문(비공개 글 포함)이 잠시 저장된다** — 처리가 끝나면 비우고, 글이 삭제되면(`DELETE`) 함께 지운다.
+
+대기 작업은 임베딩 서비스가 있는 곳에서 워커를 돌려 처리한다. 레포 루트에서 (`.env`를 읽지 않으니 값을 직접 준다):
+```bash
+# 개발 DB + 로컬 임베딩 서비스: 대기 작업을 모두 처리하고 끝낸다
+DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_dev" \
+EMBEDDER_URL="http://127.0.0.1:8100" EMBEDDER_SECRET="<임베딩 서비스의 INTERNAL_SECRET>" \
+venv/bin/python -m scripts.embedding_worker            # 옵션: --loop --interval 30 / --status / --retry-failed / --max-attempts N
+```
+- **개발 DB(로컬 호스트 + DB 이름이 `_dev`로 끝남)가 아니면 `--allow-remote` 없이는 실행하지 않는다.** 첫 줄에 `대상: DB … → 임베딩 서비스 …`가 출력된다(비밀번호 없음).
+- 서비스에 **닿지 못하면** 시도 횟수를 세지 않고 멈춘다(작업은 대기 상태 유지). **응답은 왔지만 실패하면** 횟수를 세고, 상한(기본 5)에 닿으면 `failed` — 한 작업이 큐를 막지 않는다. 원인을 고친 뒤 `--retry-failed`.
+- 워커가 둘이어도 같은 작업을 동시에 가져가지 않고(`FOR UPDATE SKIP LOCKED`), 처리 중에 글이 다시 저장되면 오래된 내용의 벡터는 쓰지 않는다.
+- 설계 메모와 상태 흐름은 `app/services/embedding_jobs.py`·`embedding_worker.py`의 docstring.
+
+#### 글 조각(청크) 임베딩 (`post_chunk_embedding`)
+
+글 벡터(`post_embedding`)는 제목+본문 **앞 1,500자** 하나뿐이라 뒷부분 내용으로는 글이 검색되지 않는다. 그래서 `PUT`은 글 전체를 **조각**으로 나눠(문단 → 문장 순으로,
+목표 800자·최대 1,000자·겹침 100자 — `app/services/chunking.py`) 조각마다 벡터를 만들고 글 벡터와 **한 트랜잭션**으로 저장한다(일부만 바뀐 상태가 생기지 않는다).
+- **조각 본문은 저장하지 않는다.** 글을 순수 텍스트로 바꾼 결과에서의 위치(`start_offset`~`end_offset`)와 해시만 둔다 → 삭제한 글의 내용이 AI DB에 남지 않는다.
+  보여 줄 때는 BE에서 글을 가져와 같은 방식으로 텍스트로 바꾸고 그 위치를 잘라 쓰는데, 저장된 해시와 다르면(글이 그 사이에 바뀜) 조각을 쓰지 않고 앞부분 텍스트로 대신한다(`chunk_excerpt.py`).
+- **글 벡터와 조각을 따로 비교**해 바뀐 쪽만 다시 만든다(같은 글을 다시 저장하면 임베딩 서비스를 부르지 않는다). 나누는 방식을 바꾸면 `CHUNKER_VERSION`을 올린다 → 모든 글이 다시 나뉜다.
+- 글 목록 채팅(`글 찾기`)은 **조각 단위로 검색**한다: 글 점수는 가장 가까운 조각의 점수, 근거 텍스트는 찾은 조각과 앞뒤 이웃 조각. 조각이 아직 없는 글은 글 벡터로 찾는다.
+- 조각 점수는 "질문 대 글 전체" 점수와 분포가 달라서 `POSTS_CHAT_MIN_SCORE`·`POSTS_CHAT_SCORE_MARGIN`을 평가 세트(`eval/`)로 다시 정했다(0.5→0.59, 0.09→0.05). 질문 18개(13개는 AI가 글을 읽고 작성 — 정답 있는 12개 중 10개)로 정한 **잠정값**이라 질문을 늘려 다시 재야 한다. 운영 환경변수에 값이 있으면 코드 기본값보다 우선한다.
+- 운영 반영: 운영 AI DB에 `schema.sql`의 `post_chunk_embedding` 부분을 먼저 적용한 뒤 배포한다(기존 글의 조각은 백필로 채운다).
+
+#### 검색 평가 (`scripts/eval_search.py`)
+
+질문 세트(`eval/questions.json`: 질문과 정답 글 id, 관련 글이 없어야 하는 질문은 `expect: []`)로 글 찾기 검색을 잰다 — 정답 글의 순위(Recall@1·@3, MRR), 조각 검색과 예전 글 벡터 검색의 비교,
+관련 없는 질문의 최고 점수, 그리고 `POSTS_CHAT_MIN_SCORE` 후보 값별로 "정답을 보여준 비율 / 관련 없는데 보여준 오탐 비율"(실제 글 찾기와 같은 선택 규칙). **개발 DB + 로컬 임베딩 서비스**로만 돌리고(개발 DB가 아니면 `--allow-remote` 필요, `.env`는 읽지 않음) DB에 쓰지 않는다.
+형식과 질문 쓰는 법은 `eval/README.md`.
+```bash
+DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_dev" \
+EMBEDDER_URL="http://127.0.0.1:8100" EMBEDDER_SECRET="<임베딩 서비스의 INTERNAL_SECRET>" \
+venv/bin/python -m scripts.eval_search            # 옵션: --questions 파일 / --thresholds 0.5,0.6 / --margin 0.09
+```
 
 ### 글 목록 채팅 `글 찾기` (`/posts-chat/stream`)
 
@@ -132,10 +172,12 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 | `INTERNAL_SECRET` | `inote-server`와 동일한 값이어야 함 (서비스 간 인증) |
 | `INOTE_SERVER_URL` | `inote-server`의 `/api/v1` 베이스 URL (글 작성자 확인용) |
 | `ALLOWED_ORIGINS` | CORS 허용 origin, 콤마로 여러 개 구분 (FE 도메인). 쉼표 뒤 공백·값을 감싼 따옴표·끝의 `/`는 자동으로 정리하고 중복·빈 항목은 버린다(`app/cors_origins.py`). 없으면 `http://localhost:3011`만, 있는데 쓸 항목이 없으면 아무 origin도 허용하지 않음 |
-| `EMBEDDER_URL` | 임베딩 서비스(`inote-embedder`) 주소. 없으면 임베딩 API는 503 (글 저장은 영향 없음) |
+| `EMBEDDER_URL` | 임베딩 서비스(`inote-embedder`) 주소. 없거나 닿지 못하면 글 저장(`PUT`)은 대기열에 남기고 202, 유사 글 조회는 503 (글 저장은 영향 없음) |
+| `EMBEDDER_TIMEOUT` / `EMBEDDER_RETRIES` | (선택) 임베딩 서비스 요청 제한 시간(초, 0 초과 300 이하, 기본 40) / 실패 시 재시도 횟수(0~5, 기본 0) |
+| `EMBEDDING_JOB_MAX_ATTEMPTS` / `EMBEDDING_JOB_STALE_SECONDS` | (선택, 워커용) 작업 하나의 최대 시도 횟수(1~20, 기본 5) / 처리 중인 채 이만큼 갱신이 없으면 워커가 멈춘 것으로 보고 다시 가져감(10~86400초, 기본 600) |
 | `EMBEDDER_SECRET` | 임베딩 서비스가 기대하는 비밀키 — `INTERNAL_SECRET`과는 **다른 값** |
-| `POSTS_CHAT_MIN_SCORE` | 글 목록 채팅의 검색 기준 점수(0~1, 기본 0.5 — A7 평가로 확정할 임시값). 1등이 이보다 낮으면 "관련 글 없음" |
-| `POSTS_CHAT_SCORE_MARGIN` | 기준에 못 미쳐도 1등 점수와 이 값 이내면 함께 보여줌(0~1, 기본 0.09, 0이면 끔 — 임시값). 같은 주제 글의 점수 차이를 보완 |
+| `POSTS_CHAT_MIN_SCORE` | 글 목록 채팅의 검색 기준 점수(0~1, 기본 0.59 — 조각 검색 평가로 정한 잠정값, 질문을 늘려 재조정). 1등이 이보다 낮으면 "관련 글 없음" |
+| `POSTS_CHAT_SCORE_MARGIN` | 기준에 못 미쳐도 1등 점수와 이 값 이내면 함께 보여줌(0~1, 기본 0.05, 0이면 끔 — 잠정값). 같은 주제 글의 점수 차이를 보완 |
 | `EMBEDDER_MODEL` | 기대하는 모델 이름(기본 `nlpai-lab/KURE-v1`) — 저장된 벡터와 다르면 다시 계산 |
 
 ## DB 스키마
