@@ -124,7 +124,7 @@ class PostsChatApiTest(unittest.TestCase):
         app = FastAPI()
         app.include_router(posts_chat.router)
         app.dependency_overrides[posts_chat.get_searcher] = lambda: PostSearcher(
-            self.server, self.embedder, self.store, min_score=0.5, limit=3
+            self.server, self.embedder, self.store, min_score=0.5, limit=3, score_margin=0.09  # 기본값이 바뀌어도 이 테스트들은 동작 방식만 본다
         )
         app.dependency_overrides[posts_chat.get_llm] = lambda: self.llm
         self.client = TestClient(app)

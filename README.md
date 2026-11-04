@@ -122,7 +122,7 @@ venv/bin/python -m scripts.embedding_worker            # 옵션: --loop --interv
   보여 줄 때는 BE에서 글을 가져와 같은 방식으로 텍스트로 바꾸고 그 위치를 잘라 쓰는데, 저장된 해시와 다르면(글이 그 사이에 바뀜) 조각을 쓰지 않고 앞부분 텍스트로 대신한다(`chunk_excerpt.py`).
 - **글 벡터와 조각을 따로 비교**해 바뀐 쪽만 다시 만든다(같은 글을 다시 저장하면 임베딩 서비스를 부르지 않는다). 나누는 방식을 바꾸면 `CHUNKER_VERSION`을 올린다 → 모든 글이 다시 나뉜다.
 - 글 목록 채팅(`글 찾기`)은 **조각 단위로 검색**한다: 글 점수는 가장 가까운 조각의 점수, 근거 텍스트는 찾은 조각과 앞뒤 이웃 조각. 조각이 아직 없는 글은 글 벡터로 찾는다.
-- ⚠️ 조각 점수는 "질문 대 글 전체" 점수와 분포가 달라서 `POSTS_CHAT_MIN_SCORE`·`POSTS_CHAT_SCORE_MARGIN`은 **평가 세트로 다시 정해야 하는 임시값**이다.
+- 조각 점수는 "질문 대 글 전체" 점수와 분포가 달라서 `POSTS_CHAT_MIN_SCORE`·`POSTS_CHAT_SCORE_MARGIN`을 평가 세트(`eval/`)로 다시 정했다(0.5→0.59, 0.09→0.05). 질문 18개(13개는 AI가 글을 읽고 작성 — 정답 있는 12개 중 10개)로 정한 **잠정값**이라 질문을 늘려 다시 재야 한다. 운영 환경변수에 값이 있으면 코드 기본값보다 우선한다.
 - 운영 반영: 운영 AI DB에 `schema.sql`의 `post_chunk_embedding` 부분을 먼저 적용한 뒤 배포한다(기존 글의 조각은 백필로 채운다).
 
 #### 검색 평가 (`scripts/eval_search.py`)
@@ -176,8 +176,8 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 | `EMBEDDER_TIMEOUT` / `EMBEDDER_RETRIES` | (선택) 임베딩 서비스 요청 제한 시간(초, 0 초과 300 이하, 기본 40) / 실패 시 재시도 횟수(0~5, 기본 0) |
 | `EMBEDDING_JOB_MAX_ATTEMPTS` / `EMBEDDING_JOB_STALE_SECONDS` | (선택, 워커용) 작업 하나의 최대 시도 횟수(1~20, 기본 5) / 처리 중인 채 이만큼 갱신이 없으면 워커가 멈춘 것으로 보고 다시 가져감(10~86400초, 기본 600) |
 | `EMBEDDER_SECRET` | 임베딩 서비스가 기대하는 비밀키 — `INTERNAL_SECRET`과는 **다른 값** |
-| `POSTS_CHAT_MIN_SCORE` | 글 목록 채팅의 검색 기준 점수(0~1, 기본 0.5 — A7 평가로 확정할 임시값). 1등이 이보다 낮으면 "관련 글 없음" |
-| `POSTS_CHAT_SCORE_MARGIN` | 기준에 못 미쳐도 1등 점수와 이 값 이내면 함께 보여줌(0~1, 기본 0.09, 0이면 끔 — 임시값). 같은 주제 글의 점수 차이를 보완 |
+| `POSTS_CHAT_MIN_SCORE` | 글 목록 채팅의 검색 기준 점수(0~1, 기본 0.59 — 조각 검색 평가로 정한 잠정값, 질문을 늘려 재조정). 1등이 이보다 낮으면 "관련 글 없음" |
+| `POSTS_CHAT_SCORE_MARGIN` | 기준에 못 미쳐도 1등 점수와 이 값 이내면 함께 보여줌(0~1, 기본 0.05, 0이면 끔 — 잠정값). 같은 주제 글의 점수 차이를 보완 |
 | `EMBEDDER_MODEL` | 기대하는 모델 이름(기본 `nlpai-lab/KURE-v1`) — 저장된 벡터와 다르면 다시 계산 |
 
 ## DB 스키마
