@@ -25,8 +25,8 @@ from typing import Optional
 
 from app.services.embedder_client import EmbedderClient, EmbedderUnavailable, expected_model
 from app.services.embedding_jobs import EmbeddingJobStore, Job
-from app.services.embedding_store import EmbeddingStore, upsert_with_cursor
-from app.services.text_prep import build_embedding_text, content_hash, html_to_text
+from app.services.embedding_store import EmbeddingStore
+from app.services.post_vectors import embed_prepared, plan_for, prepare_post, write_embedded
 
 logger = logging.getLogger(__name__)
 
@@ -126,13 +126,13 @@ class EmbeddingWorker:
     # --- 한 건 처리: "ok"(정상 또는 글 때문이 아닌 결과) / "failed"(실패 기록) / "stop"(서비스에 닿지 못해 멈춤) ---
     def _handle(self, job: Job, summary: RunSummary) -> str:
         cfg = self._config
-        text = build_embedding_text(job.title, html_to_text(job.content or ""))
-        if not text:
+        prepared = prepare_post(job.title, job.content or "")
+        if prepared is None:
             self._record_failure(job, summary, "임베딩할 내용이 없습니다.", permanent=True)
             return "ok"  # 글 내용의 문제라 서비스 장애 판단(연속 실패)에는 넣지 않는다
-        digest = content_hash(text)
         try:
-            if self._store.get_state(job.post_id) == (expected_model(), digest):
+            plan = plan_for(self._store, job.post_id, prepared)
+            if plan.nothing:
                 applied = self._jobs.complete(job.post_id, job.version, lambda cur: None)
                 if applied:
                     summary.unchanged += 1
@@ -141,11 +141,11 @@ class EmbeddingWorker:
                     summary.superseded += 1
                 return "ok"
 
-            result = self._embedder.embed([text])
+            embedded = embed_prepared(self._embedder, prepared, plan)
             applied = self._jobs.complete(
                 job.post_id,
                 job.version,
-                lambda cur: upsert_with_cursor(cur, job.post_id, result.model, digest, result.embeddings[0]),
+                lambda cur: write_embedded(cur, job.post_id, prepared, embedded),  # 글 벡터·조각·'완료'가 한 트랜잭션
             )
         except EmbedderUnavailable as e:
             if e.unreachable:

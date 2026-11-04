@@ -87,7 +87,7 @@ DB를 처음부터 다시 만들려면 `down -v`. 로컬 DB는 Supabase처럼 `e
 
 ```
 PUT  /embeddings/posts/{id}   { "title": "...", "content": "<p>HTML 본문</p>" }
-  → { "status": "embedded" | "unchanged", "model": "nlpai-lab/KURE-v1", "dim": 1024 }
+  → { "status": "embedded" | "unchanged", "model": "nlpai-lab/KURE-v1", "dim": 1024, "chunks": 3 }
 POST /embeddings/similar      { "postId": "...", "candidateIds": ["..."], "limit": 5, "minScore": 0.6 }
                            또는 { "title": "...", "content": "...", "candidateIds": [...] }   (저장 전 글)
   → { "items": [{ "postId": "...", "score": 0.78 }], "sourceEmbedded": true }
@@ -113,6 +113,17 @@ venv/bin/python -m scripts.embedding_worker            # 옵션: --loop --interv
 - 서비스에 **닿지 못하면** 시도 횟수를 세지 않고 멈춘다(작업은 대기 상태 유지). **응답은 왔지만 실패하면** 횟수를 세고, 상한(기본 5)에 닿으면 `failed` — 한 작업이 큐를 막지 않는다. 원인을 고친 뒤 `--retry-failed`.
 - 워커가 둘이어도 같은 작업을 동시에 가져가지 않고(`FOR UPDATE SKIP LOCKED`), 처리 중에 글이 다시 저장되면 오래된 내용의 벡터는 쓰지 않는다.
 - 설계 메모와 상태 흐름은 `app/services/embedding_jobs.py`·`embedding_worker.py`의 docstring.
+
+#### 글 조각(청크) 임베딩 (`post_chunk_embedding`)
+
+글 벡터(`post_embedding`)는 제목+본문 **앞 1,500자** 하나뿐이라 뒷부분 내용으로는 글이 검색되지 않는다. 그래서 `PUT`은 글 전체를 **조각**으로 나눠(문단 → 문장 순으로,
+목표 800자·최대 1,000자·겹침 100자 — `app/services/chunking.py`) 조각마다 벡터를 만들고 글 벡터와 **한 트랜잭션**으로 저장한다(일부만 바뀐 상태가 생기지 않는다).
+- **조각 본문은 저장하지 않는다.** 글을 순수 텍스트로 바꾼 결과에서의 위치(`start_offset`~`end_offset`)와 해시만 둔다 → 삭제한 글의 내용이 AI DB에 남지 않는다.
+  보여 줄 때는 BE에서 글을 가져와 같은 방식으로 텍스트로 바꾸고 그 위치를 잘라 쓰는데, 저장된 해시와 다르면(글이 그 사이에 바뀜) 조각을 쓰지 않고 앞부분 텍스트로 대신한다(`chunk_excerpt.py`).
+- **글 벡터와 조각을 따로 비교**해 바뀐 쪽만 다시 만든다(같은 글을 다시 저장하면 임베딩 서비스를 부르지 않는다). 나누는 방식을 바꾸면 `CHUNKER_VERSION`을 올린다 → 모든 글이 다시 나뉜다.
+- 글 목록 채팅(`글 찾기`)은 **조각 단위로 검색**한다: 글 점수는 가장 가까운 조각의 점수, 근거 텍스트는 찾은 조각과 앞뒤 이웃 조각. 조각이 아직 없는 글은 글 벡터로 찾는다.
+- ⚠️ 조각 점수는 "질문 대 글 전체" 점수와 분포가 달라서 `POSTS_CHAT_MIN_SCORE`·`POSTS_CHAT_SCORE_MARGIN`은 **평가 세트로 다시 정해야 하는 임시값**이다.
+- 운영 반영: 운영 AI DB에 `schema.sql`의 `post_chunk_embedding` 부분을 먼저 적용한 뒤 배포한다(기존 글의 조각은 백필로 채운다).
 
 ### 글 목록 채팅 `글 찾기` (`/posts-chat/stream`)
 

@@ -16,6 +16,7 @@ from app.services.embedding_worker import (
     RunSummary,
     WorkerConfig,
 )
+from app.services.post_vectors import prepare_post
 from app.services.text_prep import build_embedding_text, content_hash, html_to_text
 
 MODEL = "nlpai-lab/KURE-v1"
@@ -77,9 +78,13 @@ class FakeJobs:
 class FakeStore:
     def __init__(self):
         self.states = {}
+        self.chunk_states = {}
 
     def get_state(self, post_id):
         return self.states.get(post_id)
+
+    def get_chunk_state(self, post_id):
+        return self.chunk_states.get(post_id)
 
 
 class FakeEmbedder:
@@ -123,10 +128,11 @@ class ProcessingTest(WorkerTestCase):
         self.assertEqual((summary.done, summary.handled, summary.stopped), (2, 2, None))
         self.assertEqual(self.jobs.completed, [("a", 1), ("b", 1)])
         expected_text = build_embedding_text("도커", html_to_text("<h1>시작</h1><p>컨테이너</p>"))
-        self.assertEqual(self.embedder.calls[0], [expected_text])  # HTML 태그는 지워서 보낸다
+        self.assertEqual(self.embedder.calls[0], [expected_text, expected_text])  # 글 벡터용 1개 + 조각 1개. HTML 태그는 지워서 보낸다
         sql, params = self.jobs.cursor.executed[0]
         self.assertIn("post_embedding", sql)
         self.assertEqual(params[:3], ("a", MODEL, content_hash(expected_text)))  # 벡터를 같은 트랜잭션(cursor)으로 저장
+        self.assertTrue(any("post_chunk_embedding" in sql for sql, _ in self.jobs.cursor.executed))  # 조각도 같은 cursor로
 
     def test_대기열이_비어_있으면_아무것도_하지_않고_끝난다(self):
         summary = self.build([]).run_once()
@@ -144,12 +150,27 @@ class ProcessingTest(WorkerTestCase):
     def test_같은_내용과_모델의_벡터가_이미_있으면_임베딩_서비스를_부르지_않고_완료한다(self):
         worker = self.build([job("a", "제목", "<p>본문</p>")])
         self.store.states["a"] = (expected_model(), content_hash(build_embedding_text("제목", html_to_text("<p>본문</p>"))))
+        prepared = prepare_post("제목", "<p>본문</p>")
+        self.store.chunk_states["a"] = (expected_model(), prepared.source_hash, len(prepared.chunks))
 
         summary = worker.run_once()
 
         self.assertEqual((summary.unchanged, summary.done), (1, 0))
         self.assertEqual(self.embedder.calls, [])
         self.assertEqual(self.jobs.completed, [("a", 1)])
+
+    def test_글_벡터만_있고_조각이_없으면_조각만_새로_만든다(self):
+        worker = self.build([job("a", "제목", "<p>본문</p>")])
+        self.store.states["a"] = (expected_model(), content_hash(build_embedding_text("제목", html_to_text("<p>본문</p>"))))
+
+        summary = worker.run_once()
+
+        self.assertEqual(summary.done, 1)
+        self.assertEqual(len(self.embedder.calls), 1)
+        self.assertEqual(len(self.embedder.calls[0]), 1)  # 글 벡터용 입력은 없고 조각 1개뿐
+        executed = [sql for sql, _ in self.jobs.cursor.executed]
+        self.assertFalse(any("post_embedding" in sql and "insert into post_embedding" in sql for sql in executed))
+        self.assertTrue(any("post_chunk_embedding" in sql for sql in executed))
 
     def test_모델이_다르면_해시가_같아도_다시_임베딩한다(self):
         worker = self.build([job("a", "제목", "<p>본문</p>")])

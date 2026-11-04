@@ -22,11 +22,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from app.services.embedder_client import EmbedderClient, EmbedderUnavailable, expected_model, get_embedder
+from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderUnavailable, expected_model, get_embedder
 from app.services.embedding_jobs import EmbeddingJobStore, get_job_store
 from app.services.embedding_store import EmbeddingStore, get_store
 from app.services.internal_auth import require_internal_secret
-from app.services.text_prep import build_embedding_text, content_hash, html_to_text
+from app.services.post_vectors import embed_prepared, plan_for, prepare_post, write_args
+from app.services.text_prep import build_embedding_text, html_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -112,26 +113,28 @@ def upsert_post_embedding(
     embedder: EmbedderClient = Depends(get_embedder),
     jobs: EmbeddingJobStore = Depends(get_job_store),
 ):
-    text = _embedding_text(body.title, body.content)
-    if not text:
+    prepared = prepare_post(body.title, body.content)
+    if prepared is None:
         raise HTTPException(status_code=422, detail="임베딩할 내용이 없습니다.")
-    digest = content_hash(text)
 
-    # 내용(해시)과 모델이 같으면 임베딩 서비스를 부르지 않는다 — 같은 글을 다시 저장해도 비용이 들지 않는다
-    if store.get_state(post_id) == (expected_model(), digest):
+    # 내용(해시)과 모델이 같으면 임베딩 서비스를 부르지 않는다 — 같은 글을 다시 저장해도 비용이 들지 않는다.
+    # 글 벡터와 조각은 따로 비교해서, 바뀐 쪽만 다시 만든다(예: 조각 기능을 켜기 전에 저장된 글은 조각만 새로 만든다)
+    plan = plan_for(store, post_id, prepared)
+    if plan.nothing:
         _discard_job(jobs, post_id)
-        return {"status": "unchanged", "model": expected_model()}
+        return {"status": "unchanged", "model": expected_model(), "chunks": len(prepared.chunks)}
 
     try:
-        result = embedder.embed([text])
+        embedded = embed_prepared(embedder, prepared, plan)
     except EmbedderUnavailable as e:
         return _queue_or_unavailable(jobs, post_id, body, e)
 
     # 벡터를 쓰기 **전에** 대기 작업을 지운다: 워커가 같은 글을 처리 중이면 그 완료(행 잠금)를 기다렸다가 지우고,
     # 그 뒤에 이 최신 벡터를 쓴다 → 워커의 오래된 벡터가 이 벡터를 덮어쓸 수 없다. (지운 뒤에 워커가 오면 작업이 없어 아무것도 쓰지 않는다)
     _discard_job(jobs, post_id)
-    store.upsert(post_id, result.model, digest, result.embeddings[0])
-    return {"status": "embedded", "model": result.model, "dim": result.dim}
+    post, chunks = write_args(prepared, embedded)
+    store.write(post_id, embedded.model, post, chunks, prepared.source_hash)  # 글 벡터와 조각을 한 트랜잭션으로
+    return {"status": "embedded", "model": embedded.model, "dim": EXPECTED_DIM, "chunks": len(prepared.chunks)}
 
 
 @router.delete("/posts/{post_id}")

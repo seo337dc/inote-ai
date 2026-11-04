@@ -37,7 +37,9 @@ class FakeStore:
 
     def __init__(self):
         self.rows = {}
+        self.chunks = {}  # post_id -> (model, source_hash, [ChunkRow, ...])
         self.upserts = []
+        self.writes = []
         self.similar_calls = []
         self.post_matches: Optional[List[Match]] = []
         self.vector_matches: List[Match] = []
@@ -46,12 +48,28 @@ class FakeStore:
         row = self.rows.get(post_id)
         return (row[0], row[1]) if row else None
 
+    def get_chunk_state(self, post_id):
+        row = self.chunks.get(post_id)
+        return (row[0], row[1], len(row[2])) if row else None
+
     def upsert(self, post_id, model, digest, vector):
         self.rows[post_id] = (model, digest, list(vector))
         self.upserts.append(post_id)
 
+    def write(self, post_id, model, post, chunks, source_hash):
+        self.writes.append(post_id)
+        if post is not None:
+            self.upsert(post_id, model, post[0], post[1])
+        if chunks is not None:
+            if chunks:
+                self.chunks[post_id] = (model, source_hash, list(chunks))
+            else:
+                self.chunks.pop(post_id, None)
+
     def delete(self, post_id):
-        return self.rows.pop(post_id, None) is not None
+        deleted_post = self.rows.pop(post_id, None) is not None
+        deleted_chunks = self.chunks.pop(post_id, None) is not None
+        return deleted_post or deleted_chunks
 
     def similar_to_post(self, post_id, candidate_ids, limit, min_score):
         self.similar_calls.append(("post", post_id, list(candidate_ids), limit, min_score))
@@ -130,9 +148,10 @@ class UpsertTest(ApiTestCase):
         res = self.put(title="도커", content="<h1>시작</h1><p>컨테이너</p>")
 
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), {"status": "embedded", "model": MODEL, "dim": EXPECTED_DIM})
+        self.assertEqual(res.json(), {"status": "embedded", "model": MODEL, "dim": EXPECTED_DIM, "chunks": 1})
         expected_text = build_embedding_text("도커", html_to_text("<h1>시작</h1><p>컨테이너</p>"))
-        self.assertEqual(self.embedder.calls, [[expected_text]])  # HTML 태그는 지워서 보낸다
+        # 글 벡터용 텍스트 1개 + 조각 1개(짧은 글은 조각이 하나뿐이고, 제목+조각이 글 텍스트와 같다)를 한 번에 보낸다. HTML 태그는 지운다
+        self.assertEqual(self.embedder.calls, [[expected_text, expected_text]])
         model, digest, _ = self.store.rows["p1"]
         self.assertEqual((model, digest), (MODEL, content_hash(expected_text)))
 
@@ -267,6 +286,103 @@ class UpsertTest(ApiTestCase):
     def test_필수_필드가_빠지면_422(self):
         self.assertEqual(self.client.put("/embeddings/posts/p1", json={"title": "t"}, headers=HEADERS).status_code, 422)
         self.assertEqual(self.client.put("/embeddings/posts/p1", json={}, headers=HEADERS).status_code, 422)
+
+
+class ChunkUpsertTest(ApiTestCase):
+    """글 벡터와 함께 조각(청크) 벡터를 저장하는 동작."""
+
+    def put(self, post_id="p1", title="제목", content="<p>본문</p>"):
+        return self.client.put(f"/embeddings/posts/{post_id}", json={"title": title, "content": content}, headers=HEADERS)
+
+    @staticmethod
+    def long_html(paragraphs=30, word="가나다라"):
+        return "".join(f"<p>문단{n} " + word * 60 + "</p>" for n in range(paragraphs))
+
+    def test_긴_글은_여러_조각으로_나뉘어_글_벡터와_함께_한_번에_저장된다(self):
+        res = self.put(content=self.long_html())
+
+        self.assertEqual(res.status_code, 200)
+        count = res.json()["chunks"]
+        self.assertGreater(count, 3)
+        self.assertEqual(self.store.writes, ["p1"])  # 글 벡터와 조각이 한 번의 쓰기(= 한 트랜잭션)로 들어간다
+        model, _, rows = self.store.chunks["p1"]
+        self.assertEqual((model, len(rows)), (MODEL, count))
+        self.assertEqual([r.idx for r in rows], list(range(count)))  # 글 순서대로 0부터
+
+    def test_조각의_위치는_원문_텍스트를_그대로_가리키고_본문은_저장하지_않는다(self):
+        html = self.long_html()
+        self.put(title="도커", content=html)
+
+        plain = html_to_text(html)
+        for r in self.store.chunks["p1"][2]:
+            self.assertTrue(plain[r.start : r.end].startswith(("문단", "가나다라")))
+            self.assertFalse(hasattr(r, "text"))
+
+    def test_임베딩_입력이_많으면_16개씩_나눠_보낸다(self):
+        res = self.put(content=self.long_html(paragraphs=120))
+
+        self.assertGreater(res.json()["chunks"] + 1, 16)
+        self.assertTrue(all(len(c) <= 16 for c in self.embedder.calls))
+        self.assertEqual(sum(len(c) for c in self.embedder.calls), res.json()["chunks"] + 1)  # 글 벡터 1 + 조각들
+
+    def test_같은_글을_다시_저장하면_조각도_다시_만들지_않는다(self):
+        self.put(content=self.long_html())
+        res = self.put(content=self.long_html())
+
+        self.assertEqual(res.json()["status"], "unchanged")
+        self.assertEqual(self.store.writes, ["p1"])  # 두 번째 저장은 쓰기도 하지 않았다
+        self.assertEqual(len(self.embedder.calls), 1)  # 임베딩 서비스도 한 번만 불렀다
+
+    def test_글이_바뀌면_조각이_통째로_바뀐다(self):
+        self.put(content=self.long_html(paragraphs=30))
+        before = self.store.chunks["p1"][2]
+        self.put(content=self.long_html(paragraphs=10, word="마바사"))
+        after = self.store.chunks["p1"][2]
+
+        self.assertLess(len(after), len(before))
+        self.assertEqual([r.idx for r in after], list(range(len(after))))
+
+    def test_조각_기능_이전에_저장된_글은_조각만_새로_만든다(self):
+        html = self.long_html(paragraphs=6)
+        self.store.rows["p1"] = (expected_model(), content_hash(build_embedding_text("제목", html_to_text(html))), [0.0])
+
+        res = self.put(content=html)
+
+        self.assertEqual(res.json()["status"], "embedded")
+        self.assertEqual(self.store.upserts, [])  # 글 벡터는 이미 최신이라 다시 쓰지 않는다
+        self.assertEqual(sum(len(c) for c in self.embedder.calls), res.json()["chunks"])  # 글 벡터용 입력은 없다
+        self.assertEqual(len(self.store.chunks["p1"][2]), res.json()["chunks"])
+
+    def test_도중에_임베딩이_실패하면_아무것도_저장하지_않고_대기열에_남긴다(self):
+        original = self.embedder.embed
+        state = {"n": 0}
+
+        def flaky(texts):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise EmbedderUnavailable("두 번째 묶음에서 실패")
+            return original(texts)
+
+        self.embedder.embed = flaky
+        res = self.put(content=self.long_html(paragraphs=120))  # 16개씩 여러 번 나눠 보낸다
+
+        self.assertEqual(res.status_code, 202)
+        self.assertEqual((self.store.writes, self.store.rows, self.store.chunks), ([], {}, {}))  # 일부만 저장된 상태가 없다
+        self.assertIn("p1", self.jobs.jobs)
+
+    def test_본문이_비어_제목만_있는_글은_글_벡터만_있고_조각은_없다(self):
+        res = self.put(title="제목만", content="")
+
+        self.assertEqual(res.json()["chunks"], 0)
+        self.assertIn("p1", self.store.rows)
+        self.assertNotIn("p1", self.store.chunks)
+
+    def test_삭제하면_조각도_함께_지운다(self):
+        self.put(content=self.long_html())
+        res = self.client.delete("/embeddings/posts/p1", headers=HEADERS)
+
+        self.assertTrue(res.json()["deleted"])
+        self.assertNotIn("p1", self.store.chunks)
 
 
 class DeleteTest(ApiTestCase):

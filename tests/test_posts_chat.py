@@ -62,9 +62,22 @@ class FakeEmbedder:
 class FakeStore:
     def __init__(self):
         self.matches: List[Match] = []
+        self.chunk_matches: list = []
+        self.layout: dict = {}
         self.calls: List[tuple] = []
+        self.chunk_calls: List[tuple] = []
+        self.layout_down = False
 
-    def similar_to_vector(self, vector, candidate_ids, limit, min_score):
+    def similar_chunks_to_vector(self, vector, candidate_ids, limit, min_score):
+        self.chunk_calls.append((list(candidate_ids), limit, min_score))
+        return list(self.chunk_matches)
+
+    def chunk_layout(self, post_ids):
+        if self.layout_down:
+            raise RuntimeError("db down")
+        return {pid: self.layout[pid] for pid in post_ids if pid in self.layout}
+
+    def similar_to_vector(self, vector, candidate_ids, limit, min_score, without_chunks_only=False):
         self.calls.append((list(candidate_ids), limit, min_score))
         return list(self.matches)
 
