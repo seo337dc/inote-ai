@@ -12,3 +12,6 @@ __pycache__/
 # misc
 .DS_Store
 *.log
+
+# eval (질문 작성 참고용 글 목록)
+eval/posts.local.md

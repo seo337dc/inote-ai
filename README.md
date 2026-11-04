@@ -125,6 +125,17 @@ venv/bin/python -m scripts.embedding_worker            # 옵션: --loop --interv
 - ⚠️ 조각 점수는 "질문 대 글 전체" 점수와 분포가 달라서 `POSTS_CHAT_MIN_SCORE`·`POSTS_CHAT_SCORE_MARGIN`은 **평가 세트로 다시 정해야 하는 임시값**이다.
 - 운영 반영: 운영 AI DB에 `schema.sql`의 `post_chunk_embedding` 부분을 먼저 적용한 뒤 배포한다(기존 글의 조각은 백필로 채운다).
 
+#### 검색 평가 (`scripts/eval_search.py`)
+
+질문 세트(`eval/questions.json`: 질문과 정답 글 id, 관련 글이 없어야 하는 질문은 `expect: []`)로 글 찾기 검색을 잰다 — 정답 글의 순위(Recall@1·@3, MRR), 조각 검색과 예전 글 벡터 검색의 비교,
+관련 없는 질문의 최고 점수, 그리고 `POSTS_CHAT_MIN_SCORE` 후보 값별로 "정답을 보여준 비율 / 관련 없는데 보여준 오탐 비율"(실제 글 찾기와 같은 선택 규칙). **개발 DB + 로컬 임베딩 서비스**로만 돌리고(개발 DB가 아니면 `--allow-remote` 필요, `.env`는 읽지 않음) DB에 쓰지 않는다.
+형식과 질문 쓰는 법은 `eval/README.md`.
+```bash
+DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_dev" \
+EMBEDDER_URL="http://127.0.0.1:8100" EMBEDDER_SECRET="<임베딩 서비스의 INTERNAL_SECRET>" \
+venv/bin/python -m scripts.eval_search            # 옵션: --questions 파일 / --thresholds 0.5,0.6 / --margin 0.09
+```
+
 ### 글 목록 채팅 `글 찾기` (`/posts-chat/stream`)
 
 설계: `inote` 레포 `docs/kure/PLAN.md` 6절 D의 1차 범위(결정 17). 글 목록(posts) 화면의 채팅은 **검색을 먼저** 한다.
