@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routers import embeddings
-from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
+from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderHealth, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
 from app.services.embedding_jobs import JobStatus, get_job_store
 from app.services.embedding_store import Match, get_store
 from app.services.text_prep import build_embedding_text, content_hash, html_to_text
@@ -25,6 +25,9 @@ class FakeEmbedder:
     def __init__(self):
         self.calls: List[List[str]] = []
         self.down = False
+
+    def health(self):
+        return EmbedderHealth(reachable=not self.down, model=None if self.down else MODEL)
 
     def embed(self, texts):
         self.calls.append(list(texts))
@@ -130,6 +133,7 @@ class AuthTest(ApiTestCase):
         ("delete", "/embeddings/posts/p1", None),
         ("post", "/embeddings/similar", {"postId": "p1", "candidateIds": ["a"]}),
         ("post", "/embeddings/status", {"postIds": ["p1"]}),
+        ("get", "/embeddings/health", None),
     )
 
     def call(self, method, path, body, headers):
@@ -425,6 +429,19 @@ class StatusTest(ApiTestCase):
     def test_id가_상한을_넘으면_422이고_빈_목록은_빈_결과다(self):
         self.assertEqual(self.post([f"p{i}" for i in range(embeddings.MAX_CANDIDATES + 1)]).status_code, 422)
         self.assertEqual(self.post([]).json()["items"], {})
+
+
+class HealthTest(ApiTestCase):
+    def test_임베딩_서비스에_닿으면_reachable과_모델을_돌려준다(self):
+        res = self.client.get("/embeddings/health", headers=HEADERS)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"embedder": {"reachable": True, "model": MODEL}})
+
+    def test_닿지_않아도_오류가_아니라_reachable_false로_답한다(self):
+        self.embedder.down = True
+        res = self.client.get("/embeddings/health", headers=HEADERS)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"embedder": {"reachable": False, "model": None}})
 
 
 class DeleteTest(ApiTestCase):

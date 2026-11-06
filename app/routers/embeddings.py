@@ -10,6 +10,7 @@
 엔드포인트 (모두 헤더 x-internal-secret 필요)
   PUT    /embeddings/posts/{post_id}   글 제목·HTML 본문 → 벡터를 만들어 저장 (내용·모델이 같으면 다시 계산하지 않는다). 임베딩 서비스가 안 되면 대기열에 남기고 202
   DELETE /embeddings/posts/{post_id}   벡터와 대기 작업 삭제 (없어도 오류가 아니다)
+  GET    /embeddings/health            임베딩 서비스(KURE)에 닿는지 — 관리자 화면용. 닿지 않아도 200(reachable=false)
   POST   /embeddings/status            글 id 목록의 임베딩 상태(조각 수·임베딩 시각·작업 상태) 조회 — 관리자 화면용, 읽기 전용
   POST   /embeddings/similar           후보 id 안에서 가까운 글 조회 (저장된 글 기준 postId, 또는 저장 전 텍스트 title+content 기준)
 """
@@ -219,6 +220,22 @@ def status(
             job=StatusJob(status=job.status, attempts=job.attempts, lastError=job.last_error) if job else None,
         )
     return StatusResponse(model=expected_model(), items=items)
+
+
+class HealthEmbedder(BaseModel):
+    reachable: bool
+    model: Optional[str]
+
+
+class HealthResponse(BaseModel):
+    embedder: HealthEmbedder
+
+
+@router.get("/health", response_model=HealthResponse)
+def health(embedder: EmbedderClient = Depends(get_embedder)):
+    """임베딩 서비스에 닿는지만 알려준다. 서비스가 멎어 있어도 오류가 아니라 reachable=false로 답한다."""
+    result = embedder.health()
+    return HealthResponse(embedder=HealthEmbedder(reachable=result.reachable, model=result.model))
 
 
 def _items(matches) -> List[SimilarItem]:

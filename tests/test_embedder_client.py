@@ -288,5 +288,42 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual((embedder._timeout, embedder._retries), (7.0, 2))
 
 
+class HealthTest(unittest.TestCase):
+    def client(self, handler, **kwargs):
+        return EmbedderClient(base_url="http://embedder.test", secret="s", transport=httpx.MockTransport(handler), **kwargs)
+
+    def test_status가_ok이면_reachable이고_모델_이름을_돌려준다(self):
+        paths = []
+
+        def handler(request):
+            paths.append((request.method, request.url.path, request.headers.get("x-internal-secret")))
+            return httpx.Response(200, json={"status": "ok", "model": "m", "dim": 1024})
+
+        result = self.client(handler).health()
+        self.assertEqual((result.reachable, result.model), (True, "m"))
+        self.assertEqual(paths, [("GET", "/health", None)])  # 비밀키를 보내지 않는다
+
+    def test_모델을_올리는_중이거나_오류_응답이면_reachable이_아니다(self):
+        for response in (
+            httpx.Response(200, json={"status": "loading", "model": "m", "dim": None}),
+            httpx.Response(500, json={}),
+            httpx.Response(200, text="not json"),
+            httpx.Response(200, json=["ok"]),
+        ):
+            with self.subTest(status=response.status_code):
+                self.assertFalse(self.client(lambda request, r=response: r).health().reachable)
+
+    def test_연결_실패나_주소_없음도_예외_없이_reachable_false이고_재시도하지_않는다(self):
+        calls = []
+
+        def handler(request):
+            calls.append(1)
+            raise httpx.ConnectError("down")
+
+        self.assertFalse(self.client(handler, retries=3).health().reachable)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(EmbedderClient(base_url="", secret="").health().reachable)
+
+
 if __name__ == "__main__":
     unittest.main()

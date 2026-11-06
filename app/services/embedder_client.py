@@ -29,6 +29,7 @@ DEFAULT_MODEL = "nlpai-lab/KURE-v1"
 # Vercel Hobby 함수는 기본·최대 300초(문서 확인, 2026-10-12). 글 한 편 임베딩은 3~8초라 넉넉하되, 임베딩 서비스가 멎었을 때 오래 붙들리지 않게 상한을 둔다.
 DEFAULT_TIMEOUT = 40.0
 MAX_TIMEOUT = 300.0
+HEALTH_TIMEOUT = 3.0  # 상태 확인은 관리자 화면에서 목록과 함께 부르므로, 서비스가 멎었을 때 오래 기다리지 않게 embed보다 훨씬 짧게 둔다
 DEFAULT_RETRIES = 0
 MAX_RETRIES = 5
 DEFAULT_RETRY_DELAY = 1.0  # 재시도 사이 대기(초) — 시도 횟수만큼 곱해 점점 길어진다
@@ -47,6 +48,12 @@ class EmbedderUnavailable(Exception):
 
 class _Transient(EmbedderUnavailable):
     """잠시 뒤 다시 하면 될 수도 있는 실패(연결 실패·시간 초과·5xx·429). 재시도 대상이다."""
+
+
+@dataclass(frozen=True)
+class EmbedderHealth:
+    reachable: bool  # 서비스에 닿고 모델이 올라와 있다(status ok)
+    model: Optional[str]  # reachable일 때만 값이 있다
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,22 @@ class EmbedderClient:
                 logger.warning("embedder retry %s/%s", attempt, self._retries)
                 time.sleep(self._retry_delay * attempt)
         raise AssertionError("unreachable")  # 위 반복은 반드시 반환하거나 예외를 던진다
+
+    def health(self) -> EmbedderHealth:
+        """서비스가 응답하고 모델이 올라와 있는지 확인한다. 어떤 실패든 예외를 던지지 않고 reachable=False로 돌려준다(재시도 없음, HEALTH_TIMEOUT).
+        /health는 비밀키가 필요 없다(임베딩을 만들지 않고 상태만 알려준다)."""
+        down = EmbedderHealth(reachable=False, model=None)
+        if not self._base_url:
+            return down
+        try:
+            with httpx.Client(timeout=min(self._timeout, HEALTH_TIMEOUT), transport=self._transport) as client:
+                res = client.get(f"{self._base_url}/health")
+            body = res.json()
+        except (httpx.HTTPError, ValueError):
+            return down
+        if res.status_code != 200 or not isinstance(body, dict) or body.get("status") != "ok":
+            return down  # 모델을 아직 올리는 중(loading)이면 임베딩을 만들 수 없다
+        return EmbedderHealth(reachable=True, model=body.get("model") if isinstance(body.get("model"), str) else None)
 
     def _embed_once(self, texts: List[str]) -> EmbedResult:
         try:
