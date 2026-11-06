@@ -171,6 +171,18 @@ class PostChunkDbTest(unittest.TestCase):
         near = self.store.similar_to_vector(vec(7), ids, 10, 0.5, without_chunks_only=True)
         self.assertEqual(near, [])  # p1은 글 벡터가 가까워도 조각이 있으니 보충 대상이 아니다
 
+    def test_조각_요약은_요청한_글만_조각_수와_최신_시각을_돌려준다(self):
+        self.store.write("itest-chunk-a", "m", ("h", vec(0)), [row(0, 0, 10, 1), row(1, 8, 20, 2)], "s")
+        self.store.write("itest-chunk-b", "m", ("h", vec(0)), [row(0, 0, 10, 3)], "s")
+        self.store.write("itest-chunk-c", "m", ("h", vec(0)), None, "s")  # 글 벡터만 있고 조각은 없다
+
+        summary = self.store.chunk_summary(["itest-chunk-a", "itest-chunk-c", "itest-chunk-none"])
+
+        self.assertEqual(sorted(summary), ["itest-chunk-a"])  # b는 요청하지 않았고, c는 조각이 없고, none은 없는 글
+        self.assertEqual(summary["itest-chunk-a"][0], 2)
+        self.assertIsNotNone(summary["itest-chunk-a"][1].tzinfo)  # 시각은 시간대가 있는 값
+        self.assertEqual(self.store.chunk_summary([]), {})
+
 
 if __name__ == "__main__":
     unittest.main()

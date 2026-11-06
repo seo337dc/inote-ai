@@ -321,6 +321,22 @@ class EmbeddingJobQueueDbTest(unittest.TestCase):
         self.assertEqual(after.get("pending", 0) - before.get("pending", 0), 2)
         self.assertEqual(after.get("failed", 0) - before.get("failed", 0), 1)
 
+    def test_상태_조회는_요청한_글의_작업_상태만_돌려주고_본문은_읽지_않는다(self):
+        self.jobs.enqueue("itest-job-1", "t", "<p>비공개 본문</p>")
+        self.jobs.enqueue("itest-job-2", "t", "<p>c</p>")
+        self.jobs.enqueue("itest-job-3", "t", "<p>c</p>")
+        job = self.jobs.claim_next(max_attempts=3, stale_seconds=3600)  # 가장 오래된 itest-job-1이 처리 중이 된다
+        self.assertEqual(job.post_id, "itest-job-1")
+        self.jobs.fail("itest-job-1", job.version, "timeout", max_attempts=1)  # 상한 도달 → failed
+
+        statuses = self.jobs.statuses(["itest-job-1", "itest-job-2", "itest-job-none"])
+
+        self.assertEqual(sorted(statuses), ["itest-job-1", "itest-job-2"])  # 3은 요청하지 않았고 none은 작업이 없다
+        self.assertEqual((statuses["itest-job-1"].status, statuses["itest-job-1"].attempts, statuses["itest-job-1"].last_error), ("failed", 1, "timeout"))
+        self.assertEqual(statuses["itest-job-2"].status, "pending")
+        self.assertFalse(hasattr(statuses["itest-job-2"], "content"))
+        self.assertEqual(self.jobs.statuses([]), {})
+
 
 if __name__ == "__main__":
     unittest.main()

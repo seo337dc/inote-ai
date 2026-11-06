@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.db.postgres import get_connection
@@ -223,6 +224,20 @@ class EmbeddingStore:
             for post_id, idx, start, end, digest in cur.fetchall():
                 layout.setdefault(post_id, []).append(ChunkInfo(int(idx), int(start), int(end), digest))
         return layout
+
+    def chunk_summary(self, post_ids: Sequence[str]) -> Dict[str, Tuple[int, datetime]]:
+        """글별 (조각 수, 가장 최근 임베딩 시각). 조각이 없는 글은 결과에 없다. 읽기 전용(관리자 상태 조회용)."""
+        summary: Dict[str, Tuple[int, datetime]] = {}
+        if not post_ids:
+            return summary
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "select post_id, count(*), max(embedded_at) from post_chunk_embedding where post_id = any(%s) group by post_id",
+                (list(post_ids),),
+            )
+            for post_id, count, embedded_at in cur.fetchall():
+                summary[post_id] = (int(count), embedded_at)
+        return summary
 
 
 def get_store() -> EmbeddingStore:
