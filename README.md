@@ -193,9 +193,9 @@ TEST_DATABASE_URL="postgresql://ai:<AI_DEV_DB_PASSWORD>@127.0.0.1:5434/inote_ai_
 배포 URL: https://inote-ai-cyan.vercel.app (헬스 체크 `/health`, 진단용 `/health/db`는 내부 시크릿 헤더 필요)
 
 - `.vercelignore`가 `venv/`, `.env`, `docs/`, 테스트 등을 번들에서 뺀다(Python 함수는 프로젝트 파일을 전부 번들에 넣는다).
-- Render에서 2026-09-30에 이전했다 — 경위와 한도·트러블슈팅은 [`docs/adr/0001-render-to-vercel.md`](./docs/adr/0001-render-to-vercel.md). 서버리스라 상시 프로세스·WebSocket·백그라운드 작업이 없고, 별도의 콜드 스타트 방지 핑도 필요 없다.
+- Render에서 2026-09-30에 이전했다 — 경위와 한도·트러블슈팅은 https://inote-main.vercel.app/posts/cmwem6t490011gj39lvi33yg4. 서버리스라 상시 프로세스·WebSocket·백그라운드 작업이 없고, 별도의 콜드 스타트 방지 핑도 필요 없다.
 - `render.yaml`·`runtime.txt`는 Render 시절 파일이 남은 것이다.
-- DB: [`docs/adr/0002-neon-to-supabase.md`](./docs/adr/0002-neon-to-supabase.md)
+- DB: https://inote-main.vercel.app/posts/cmwem80a00015gj3958ds004n
 
 ## 관련 문서
 
