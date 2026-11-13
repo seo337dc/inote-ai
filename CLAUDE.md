@@ -79,7 +79,7 @@ Vercel (`https://inote-ai-cyan.vercel.app`). Render 무료 한도 초과로 2026
 - **주의**: pydantic `BaseModel` 필드는 `Optional[X]` 필수 — `from __future__ import annotations` +
   `X | None`은 Python 3.9에서 런타임 에러 (devlog-llm CLAUDE.md "알아둘 것" 참고)
 
-## 다음 할 일 — 블로그 LLM 기능 진행 순서 (2026-09-11 확정, 하나씩 확인하며 진행)
+## 블로그 LLM 기능 진행 순서 (2026-09-11 확정, 1~5·3.5번 완료 — 남은 일은 백로그)
 
 한 번에 몰아서 하지 않고, 각 단계마다 실제로 확인한 뒤 다음 단계로 넘어간다.
 
@@ -127,19 +127,13 @@ Vercel (`https://inote-ai-cyan.vercel.app`). Render 무료 한도 초과로 2026
       true일 때만 최소 길이를 요구하도록 `ValidateIf`로 수정. (2) 메시지를 한 번도 안 보낸
       새 세션의 히스토리 조회가 403을 내던 것 — 존재하지 않는 세션은 403이 아니라 빈 배열이
       맞음. 브라우저로 일반/글쓰기 세션 둘 다 저장·전환·실시간 제목 반영·검색까지 확인 완료.
-- [ ] **6. 웹 검색 도구 추가** — Groq `compound-beta` 연동.
-- [ ] **7. "에디터에 삽입" tool-call 추가** — 자유 대화형(제안 또는 사용자 요청 시 실제 삽입).
-- [ ] **8. 오래된 draft 정리 배치** (3번 완료 후) — `inote-server`에 매일 00시 크론
-      (`@nestjs/schedule`, `inote-server`는 이미 별도 헬스체크로 계속 깨어있어서 인프로세스
-      크론으로 충분 — 슬립 걱정 없음): `publishedAt IS NULL`이고 `createdAt` 기준 2일 지난
-      `Post` 삭제 → 삭제된 postId 목록을 들고 `inote-ai`를 호출(고정 시크릿 헤더)해서 그
-      글들의 대화 기록도 같이 삭제.
+- 남은 항목(6 웹 검색 도구, 7 "에디터에 삽입" tool-call, 8 오래된 draft 정리 배치)은 `inote` 레포 `docs/todo/backlog.md` 6절로 옮겼다. 8번의 상세(매일 00시 크론, `publishedAt IS NULL` + 2일 경과 삭제 → `inote-ai` 대화 기록 삭제)도 거기 있다.
 
 **2026-09-11 재검토 — draft를 없앨지 고민했으나 유지로 결론**
 
 빈 draft가 DB에 영구히 남는 게 곤란해 보여서 "저장 전엔 채팅도 로컬 메모리에만 두고, 저장
 시점에 한 번에 올리는" 대안을 검토했었음. 하지만 그러면 새로고침/탭 종료 시 글 내용과 채팅
-둘 다 날아가는 문제가 있어 기각. 결론: draft는 유지하고, 대신 위 8번 배치로 오래된 draft를
+둘 다 날아가는 문제가 있어 기각. 결론: draft는 유지하고, 대신 백로그의 "오래된 draft 정리 배치"로 오래된 draft를
 주기적으로 정리 — draft가 DB에 계속 쌓이는 것 자체는 "어차피 임시저장"이라 문제 아님, 무한정
 쌓이지만 않으면 됨.
 
