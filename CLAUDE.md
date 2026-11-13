@@ -63,7 +63,7 @@
 
 ## 배포
 
-Vercel (`https://inote-ai-cyan.vercel.app`). Render 무료 한도 초과로 2026-09-30 이전했다 — [`docs/adr/0001-render-to-vercel.md`](./docs/adr/0001-render-to-vercel.md). DB는 Supabase 별도 프로젝트([`0002`](./docs/adr/0002-neon-to-supabase.md)). `render.yaml`·`runtime.txt`는 Render 시절 파일이 남은 것이다.
+Vercel (`https://inote-ai-cyan.vercel.app`). Render 무료 한도 초과로 2026-09-30 이전했다 — https://inote-main.vercel.app/posts/cmwem6t490011gj39lvi33yg4. DB는 Supabase 별도 프로젝트(https://inote-main.vercel.app/posts/cmwem80a00015gj3958ds004n). `render.yaml`·`runtime.txt`는 Render 시절 파일이 남은 것이다.
 
 ## Git / GitHub 계정
 
