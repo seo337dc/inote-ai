@@ -3,6 +3,7 @@
 
 import os
 import unittest
+from datetime import datetime, timezone
 from typing import List, Optional
 from unittest import mock
 
@@ -10,8 +11,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.routers import embeddings
-from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
-from app.services.embedding_jobs import get_job_store
+from app.services.embedder_client import EXPECTED_DIM, EmbedderClient, EmbedderHealth, EmbedderUnavailable, EmbedResult, expected_model, get_embedder
+from app.services.embedding_jobs import JobStatus, get_job_store
 from app.services.embedding_store import Match, get_store
 from app.services.text_prep import build_embedding_text, content_hash, html_to_text
 
@@ -24,6 +25,9 @@ class FakeEmbedder:
     def __init__(self):
         self.calls: List[List[str]] = []
         self.down = False
+
+    def health(self):
+        return EmbedderHealth(reachable=not self.down, model=None if self.down else MODEL)
 
     def embed(self, texts):
         self.calls.append(list(texts))
@@ -41,6 +45,7 @@ class FakeStore:
         self.upserts = []
         self.writes = []
         self.similar_calls = []
+        self.chunk_info = {}  # post_id -> (조각 수, 임베딩 시각) — status 응답용
         self.post_matches: Optional[List[Match]] = []
         self.vector_matches: List[Match] = []
 
@@ -71,6 +76,9 @@ class FakeStore:
         deleted_chunks = self.chunks.pop(post_id, None) is not None
         return deleted_post or deleted_chunks
 
+    def chunk_summary(self, post_ids):
+        return {p: self.chunk_info[p] for p in post_ids if p in self.chunk_info}
+
     def similar_to_post(self, post_id, candidate_ids, limit, min_score):
         self.similar_calls.append(("post", post_id, list(candidate_ids), limit, min_score))
         return self.post_matches
@@ -87,6 +95,10 @@ class FakeJobStore:
         self.jobs = {}  # post_id -> {"title", "content", "version"}
         self.fail_enqueue = False
         self.fail_delete = False
+        self.job_status = {}  # post_id -> JobStatus — status 응답용
+
+    def statuses(self, post_ids):
+        return {p: self.job_status[p] for p in post_ids if p in self.job_status}
 
     def enqueue(self, post_id, title, content):
         if self.fail_enqueue:
@@ -120,6 +132,8 @@ class AuthTest(ApiTestCase):
         ("put", "/embeddings/posts/p1", {"title": "t", "content": "<p>c</p>"}),
         ("delete", "/embeddings/posts/p1", None),
         ("post", "/embeddings/similar", {"postId": "p1", "candidateIds": ["a"]}),
+        ("post", "/embeddings/status", {"postIds": ["p1"]}),
+        ("get", "/embeddings/health", None),
     )
 
     def call(self, method, path, body, headers):
@@ -383,6 +397,51 @@ class ChunkUpsertTest(ApiTestCase):
 
         self.assertTrue(res.json()["deleted"])
         self.assertNotIn("p1", self.store.chunks)
+
+
+class StatusTest(ApiTestCase):
+    def post(self, ids):
+        return self.client.post("/embeddings/status", json={"postIds": ids}, headers=HEADERS)
+
+    def test_임베딩도_작업도_없는_글은_빈_상태로_나온다(self):
+        res = self.post(["p1"])
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["items"]["p1"], {"chunkCount": 0, "embeddedAt": None, "job": None})
+        self.assertEqual(res.json()["model"], expected_model())
+
+    def test_조각_수와_임베딩_시각과_작업_상태를_글별로_합쳐서_돌려준다(self):
+        at = datetime(2026, 11, 4, 8, 0, tzinfo=timezone.utc)
+        self.store.chunk_info["p1"] = (3, at)
+        self.jobs.job_status["p2"] = JobStatus(status="failed", attempts=3, last_error="timeout")
+        items = self.post(["p1", "p2"]).json()["items"]
+        self.assertEqual(items["p1"], {"chunkCount": 3, "embeddedAt": at.isoformat(), "job": None})
+        self.assertEqual(items["p2"]["job"], {"status": "failed", "attempts": 3, "lastError": "timeout"})
+
+    def test_요청하지_않은_글은_나오지_않고_중복_id는_한_번만_나온다(self):
+        self.store.chunk_info["other"] = (1, datetime(2026, 1, 1, tzinfo=timezone.utc))
+        res = self.post(["p1", "p1"])
+        self.assertEqual(list(res.json()["items"]), ["p1"])
+
+    def test_글_본문은_응답에_들어가지_않는다(self):
+        self.jobs.job_status["p1"] = JobStatus(status="pending", attempts=0, last_error=None)
+        self.assertNotIn("content", self.post(["p1"]).json()["items"]["p1"]["job"])
+
+    def test_id가_상한을_넘으면_422이고_빈_목록은_빈_결과다(self):
+        self.assertEqual(self.post([f"p{i}" for i in range(embeddings.MAX_CANDIDATES + 1)]).status_code, 422)
+        self.assertEqual(self.post([]).json()["items"], {})
+
+
+class HealthTest(ApiTestCase):
+    def test_임베딩_서비스에_닿으면_reachable과_모델을_돌려준다(self):
+        res = self.client.get("/embeddings/health", headers=HEADERS)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"embedder": {"reachable": True, "model": MODEL}})
+
+    def test_닿지_않아도_오류가_아니라_reachable_false로_답한다(self):
+        self.embedder.down = True
+        res = self.client.get("/embeddings/health", headers=HEADERS)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"embedder": {"reachable": False, "model": None}})
 
 
 class DeleteTest(ApiTestCase):

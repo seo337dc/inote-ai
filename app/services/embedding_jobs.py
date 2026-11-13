@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Sequence
 
 from app.db.postgres import get_connection
 
@@ -30,6 +30,13 @@ class Job:
     content: Optional[str]  # HTML 본문. 정상 작업에는 있다
     version: int
     attempts: int  # 이번에 가져온 것까지 센 시도 횟수
+
+
+@dataclass(frozen=True)
+class JobStatus:
+    status: str  # pending | processing | done | failed
+    attempts: int
+    last_error: Optional[str]
 
 
 class EmbeddingJobStore:
@@ -166,6 +173,20 @@ class EmbeddingJobStore:
         with get_connection() as conn, conn.cursor() as cur:
             cur.execute("select status, count(*) from embedding_job group by status")
             return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+    def statuses(self, post_ids: Sequence[str]) -> Dict[str, JobStatus]:
+        """글별 작업 상태(본문 content는 읽지 않는다). 작업이 없는 글은 결과에 없다. 읽기 전용(관리자 상태 조회용)."""
+        result: Dict[str, JobStatus] = {}
+        if not post_ids:
+            return result
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "select post_id, status, attempts, last_error from embedding_job where post_id = any(%s)",
+                (list(post_ids),),
+            )
+            for post_id, status, attempts, last_error in cur.fetchall():
+                result[post_id] = JobStatus(status=status, attempts=int(attempts), last_error=last_error)
+        return result
 
 
 def get_job_store() -> EmbeddingJobStore:
